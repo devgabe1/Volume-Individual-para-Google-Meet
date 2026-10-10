@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="512" height="512">
+  <!-- Ícone "volume_up" (Material) nas cores do Google Meet.
+       Área útil ~100px dentro de 128px, como pede a Chrome Web Store. -->
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FFC400"/>
+      <stop offset="1" stop-color="#FFD60A"/>
+    </linearGradient>
+    <!-- brilho rosado na saída do som, como no logo do Meet -->
+    <radialGradient id="glow" cx="12" cy="12" r="5" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFB7C9" stop-opacity="1"/>
+      <stop offset="1" stop-color="#FFD60A" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <g transform="translate(-2 -2) scale(5.5)">
+    <path fill="url(#body)" d="M3 9v6h4l5 5V4L7 9H3z"/>
+    <path fill="url(#glow)" d="M3 9v6h4l5 5V4L7 9H3z"/>
+    <path fill="#F9AB00" d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/>
+    <path fill="#F9AB00" d="M14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>
+  </g>
+</svg>

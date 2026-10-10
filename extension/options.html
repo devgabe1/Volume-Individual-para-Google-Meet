@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Volume Individual — opções</title>
+  <link rel="icon" href="icons/icon32.png">
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <main>
+    <header>
+      <img src="icons/icon48.png" alt="" width="40" height="40">
+      <div>
+        <h1>Volume Individual para Google Meet</h1>
+        <p class="muted">As mudanças valem na hora, inclusive em chamadas abertas.</p>
+      </div>
+    </header>
+
+    <section>
+      <h2>Geral</h2>
+      <div class="card">
+        <div class="item">
+          <div class="text">
+            <div>Volume geral</div>
+            <div class="muted">Multiplica o volume de todos os participantes.</div>
+          </div>
+          <div class="range">
+            <input type="range" id="master" min="0" max="200" step="5">
+            <span class="pct" id="masterPct"></span>
+          </div>
+        </div>
+        <label class="item switch">
+          <div class="text">
+            <div>Igualar volumes</div>
+            <div class="muted">Aproxima o volume de quem fala alto e de quem fala baixo, e evita som estourado acima de 100%.</div>
+          </div>
+          <input type="checkbox" id="normalize"><span class="track"></span>
+        </label>
+        <label class="item switch">
+          <div class="text">
+            <div>Identificar nomes automaticamente</div>
+            <div class="muted">Descobre quem é cada voz comparando com o indicador de fala dos quadros do Meet.</div>
+          </div>
+          <input type="checkbox" id="autoName"><span class="track"></span>
+        </label>
+        <div class="item">
+          <div class="text">
+            <div>Posição do botão flutuante</div>
+            <div class="muted">Volta o botão para o canto inferior esquerdo da tela do Meet.</div>
+          </div>
+          <button id="resetPos" class="btn">Restaurar</button>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <h2>Pessoas salvas <span class="muted" id="count"></span></h2>
+        <input type="search" id="filter" placeholder="Buscar nome">
+      </div>
+      <div class="card" id="people"></div>
+      <p class="empty muted" id="empty">Ninguém salvo ainda. Ajuste o volume de alguém numa chamada e a pessoa aparece aqui.</p>
+      <div class="actions">
+        <button id="clearAll" class="btn danger">Apagar todas</button>
+      </div>
+    </section>
+
+    <footer class="muted">
+      Nenhum dado sai do seu navegador. Versão <span id="version"></span>.
+    </footer>
+  </main>
+  <script src="options.js"></script>
+</body>
+</html>
