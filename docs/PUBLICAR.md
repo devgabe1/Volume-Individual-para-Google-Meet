@@ -81,8 +81,9 @@ Sugestões de capturas:
 - **Código remoto:** Não. Todo o código está no pacote.
 - **Uso de dados:** não marque nenhuma categoria de coleta. O processamento é
   local e nada é transmitido. Marque as três declarações de conformidade.
-- **URL da política de privacidade:** use o link do [`PRIVACY.md`](../PRIVACY.md)
-  no GitHub (por exemplo, `https://github.com/<usuario>/<repo>/blob/main/PRIVACY.md`).
+- **URL da política de privacidade:**
+  `https://github.com/devgabe1/Volume-Individual-para-Google-Meet/blob/main/PRIVACY.md`
+  (o repositório precisa estar público).
 
 ### Distribuição
 

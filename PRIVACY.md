@@ -37,4 +37,4 @@ terceiros.
 
 ## Contato
 
-Dúvidas: abra uma _issue_ no repositório do projeto.
+Dúvidas: abra uma [issue no GitHub](https://github.com/devgabe1/Volume-Individual-para-Google-Meet/issues).
