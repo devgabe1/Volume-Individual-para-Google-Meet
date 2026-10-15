@@ -188,7 +188,7 @@
   // Ficam no chrome.storage.local (via bridge.js), compartilhadas com a página de
   // opções. Volumes são salvos por nome da pessoa (IDs de áudio mudam a cada
   // chamada; o nome não).
-  const DEFAULTS = { master: 1, normalize: false, autoName: true, ui: null, people: {} };
+  const DEFAULTS = { master: 1, normalize: false, autoName: true, dock: true, ui: null, people: {} };
   const store = { ...DEFAULTS, people: {} };
   const storeListeners = new Set(); // a UI se inscreve para refletir mudanças vindas das opções
   const ownSaves = [];              // ecos dos nossos próprios saves, para ignorar
@@ -975,6 +975,14 @@
     root.append(panel, fab, tile.el);
     document.documentElement.append(host);
 
+    const togglePanel = () => {
+      panel.hidden = !panel.hidden;
+      dock.setActive(!panel.hidden);
+      render();
+      layout();
+    };
+    const dock = buildDock(togglePanel);
+
     // ---- posição do botão e do painel (arrastáveis, posição salva)
     let pos = savedPos();
 
@@ -983,26 +991,51 @@
       masterSlider.set(master);
       normalizeToggle.querySelector('input').checked = !!store.normalize;
       pos = savedPos();
+      dock.sync();
       layout();
     });
 
     function layout() {
       const vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
-      pos.x = Math.min(Math.max(pos.x, 4), vw - FAB - 4);
-      pos.y = Math.min(Math.max(pos.y, 4), vh - FAB - 4);
-      fab.style.left = pos.x + 'px';
-      fab.style.top = pos.y + 'px';
+      fab.hidden = dock.docked;
+      header.style.cursor = dock.docked ? 'default' : '';
+      if (!dock.docked) {
+        pos.x = Math.min(Math.max(pos.x, 4), vw - FAB - 4);
+        pos.y = Math.min(Math.max(pos.y, 4), vh - FAB - 4);
+        fab.style.left = pos.x + 'px';
+        fab.style.top = pos.y + 'px';
+      }
       if (panel.hidden) return;
-      // Painel abre acima do botão se couber; senão, abaixo. Alinhado pela esquerda.
       const ph = panel.offsetHeight;
+      if (dock.docked) {
+        // Na barra do Meet: abre acima do botão, centralizado nele, como os menus do Meet.
+        const r = dock.rect();
+        panel.style.top = Math.max(4, r.top - ph - 12) + 'px';
+        panel.style.left = Math.min(Math.max(r.left + r.width / 2 - PANEL_W / 2, 4), vw - PANEL_W - 4) + 'px';
+        return;
+      }
+      // Flutuante: abre acima do botão se couber; senão, abaixo. Alinhado pela esquerda.
       const above = pos.y - ph - 8;
       panel.style.top = (above >= 4 ? above : Math.min(pos.y + FAB + 8, vh - ph - 4)) + 'px';
       panel.style.left = Math.min(Math.max(pos.x, 4), vw - PANEL_W - 4) + 'px';
     }
 
+    // Na barra do Meet o painel se comporta como os menus dele: fecha ao clicar fora.
+    document.addEventListener('pointerdown', (e) => {
+      if (!dock.docked || panel.hidden) return;
+      const path = e.composedPath();
+      if (path.includes(host) || path.includes(dock.host)) return;
+      togglePanel();
+    }, true);
+
+    // Procura a barra periodicamente: ela só existe dentro da chamada e o Meet a recria.
+    setInterval(() => { if (dock.sync()) layout(); }, 1000);
+    dock.sync();
+
     function draggable(handle, onClick) {
       handle.addEventListener('pointerdown', (e) => {
         if (e.button !== 0) return;
+        if (dock.docked && handle === header) return; // na barra, o painel fica preso ao botão
         const sx = e.clientX, sy = e.clientY, ox = pos.x, oy = pos.y;
         let moved = false;
         handle.setPointerCapture(e.pointerId);
@@ -1033,7 +1066,7 @@
       });
     }
 
-    draggable(fab, () => { panel.hidden = !panel.hidden; render(); layout(); });
+    draggable(fab, togglePanel);
     draggable(header);
     window.addEventListener('resize', layout);
     layout();
@@ -1138,6 +1171,7 @@
     setInterval(() => {
       const issues = health();
       fab.classList.toggle('alert', issues.some((i) => i.level === 'error'));
+      dock.setAlert(issues.some((i) => i.level === 'error'));
       warnings.replaceChildren(...issues.map((i) => h('div', { className: `warn ${i.level}`, textContent: i.text })));
       for (const i of issues) {
         // console.info (e não warn): avisos já aparecem no painel, e console.warn de
@@ -1180,6 +1214,120 @@
     for (let p = t.parentElement?.closest('[data-participant-id]'); p && p.getAttribute('data-participant-id') === pid;
       p = p.parentElement?.closest('[data-participant-id]')) t = p;
     return t;
+  }
+
+  // ---------------------------------------------------------------- botão na barra do Meet
+  // As classes do Meet são embaralhadas e mudam a cada versão, então a barra é
+  // encontrada pela aparência: o botão de sair da chamada é o único botão largo e
+  // vermelho no rodapé. A barra é o menor ancestral dele com vários botões, e o nosso
+  // botão entra antes do primeiro grupo (o do microfone), copiando o visual de um
+  // botão redondo vizinho.
+  const isVisible = (r) => r.width > 0 && r.height > 0;
+  const rgb = (c) => (c.match(/\d+(\.\d+)?/g) || []).map(Number);
+
+  function looksRed(el) {
+    for (const e of [el, ...el.querySelectorAll('*')].slice(0, 6)) {
+      const [r, g, b, a = 1] = rgb(getComputedStyle(e).backgroundColor);
+      if (a > 0.5 && r > 180 && g < 100 && b < 100) return true;
+    }
+    return false;
+  }
+
+  function findMeetBar() {
+    const vh = document.documentElement.clientHeight;
+    let leave = null;
+    for (const b of document.querySelectorAll('button')) {
+      if (b.closest('#meet-volume-root, #meet-volume-dock')) continue;
+      const r = b.getBoundingClientRect();
+      if (!isVisible(r) || r.top < vh - 200 || r.height < 28 || r.width < r.height * 1.3) continue;
+      if (looksRed(b)) { leave = b; break; }
+    }
+    if (!leave) return null;
+
+    let bar = leave.parentElement;
+    const countButtons = (el) => [...el.querySelectorAll('button')].filter((b) => isVisible(b.getBoundingClientRect())).length;
+    while (bar && bar !== document.body && countButtons(bar) < 5) bar = bar.parentElement;
+    if (!bar || bar === document.body || bar.getBoundingClientRect().height > 160) return null;
+
+    // Filho da barra que contém o botão mais à esquerda = grupo do microfone.
+    let first = null, firstLeft = Infinity;
+    for (const child of bar.children) {
+      if (child.id === 'meet-volume-dock') continue;
+      for (const b of child.querySelectorAll('button')) {
+        const r = b.getBoundingClientRect();
+        if (isVisible(r) && r.left < firstLeft) { firstLeft = r.left; first = child; }
+      }
+    }
+    if (!first) return null;
+
+    // Visual de referência: um botão redondo, nem vermelho nem transparente.
+    let ref = null;
+    for (const b of bar.querySelectorAll('button')) {
+      const r = b.getBoundingClientRect();
+      const [, , , a = 1] = rgb(getComputedStyle(b).backgroundColor);
+      if (isVisible(r) && Math.abs(r.width - r.height) <= 2 && r.width >= 32 && a > 0.3 && !looksRed(b)) { ref = b; break; }
+    }
+    // Espaço entre grupos: distância entre os dois primeiros filhos visíveis.
+    const kids = [...bar.children].filter((c) => c.id !== 'meet-volume-dock' && isVisible(c.getBoundingClientRect()))
+      .sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
+    const gap = kids.length > 1 ? kids[1].getBoundingClientRect().left - kids[0].getBoundingClientRect().right : 8;
+    return { bar, first, ref, gap: Math.min(Math.max(gap, 4), 24) };
+  }
+
+  function buildDock(onClick) {
+    const host = document.createElement('div');
+    host.id = 'meet-volume-dock';
+    const root = host.attachShadow({ mode: 'open' });
+    root.append(h('style', { textContent: `
+      :host { display: inline-flex; align-items: center; flex: none; }
+      button {
+        position: relative; display: grid; place-items: center; padding: 0; border: none; cursor: pointer;
+        width: var(--w, 48px); height: var(--h, 48px); border-radius: var(--r, 50%);
+        background: var(--bg, #3c4043); color: var(--fg, #e8eaed); transition: filter .15s, background .15s;
+      }
+      button:hover { filter: brightness(1.18); }
+      button:focus-visible { outline: 2px solid #8ab4f8; outline-offset: 2px; }
+      button.active { background: #8ab4f8; color: #202124; }
+      button.alert::after {
+        content: ''; position: absolute; top: 4px; right: 4px; width: 9px; height: 9px;
+        border-radius: 50%; background: #ea4335; border: 2px solid var(--bg, #3c4043);
+      }
+    ` }));
+    const btn = h('button', { title: 'Volume individual', ariaLabel: 'Volume individual', onclick: onClick }, icon('volumeUp', 24));
+    root.append(btn);
+
+    const dock = {
+      host,
+      docked: false,
+      rect: () => btn.getBoundingClientRect(),
+      setActive: (on) => btn.classList.toggle('active', on),
+      setAlert: (on) => btn.classList.toggle('alert', on),
+      // Encaixa (ou mantém encaixado) na barra. Devolve true se o estado mudou.
+      sync() {
+        const was = dock.docked;
+        const found = store.dock !== false ? findMeetBar() : null;
+        if (!found) {
+          host.remove();
+          dock.docked = false;
+          return was !== dock.docked;
+        }
+        const { bar, first, ref, gap } = found;
+        if (host.parentElement !== bar || host.nextElementSibling !== first) bar.insertBefore(host, first);
+        host.style.marginRight = gap + 'px';
+        if (ref) {
+          const r = ref.getBoundingClientRect();
+          const cs = getComputedStyle(ref);
+          host.style.setProperty('--w', Math.round(r.width) + 'px');
+          host.style.setProperty('--h', Math.round(r.height) + 'px');
+          host.style.setProperty('--r', cs.borderRadius);
+          host.style.setProperty('--bg', cs.backgroundColor);
+          host.style.setProperty('--fg', cs.color);
+        }
+        dock.docked = true;
+        return was !== dock.docked;
+      },
+    };
+    return dock;
   }
 
   function buildTileControl() {

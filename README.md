@@ -33,7 +33,7 @@ _Em breve._
 1. Baixe ou clone este repositório.
 2. Abra `chrome://extensions` e ative o **Modo do desenvolvedor**.
 3. Clique em **Carregar sem compactação** e selecione a pasta [`extension/`](extension).
-4. Entre numa chamada do Meet: o botão de volume aparece no canto inferior esquerdo.
+4. Entre numa chamada do Meet: o botão de volume aparece na barra de controles, ao lado do microfone.
 
 ## Como funciona
 

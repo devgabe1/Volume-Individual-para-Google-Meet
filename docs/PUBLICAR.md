@@ -63,7 +63,7 @@ Sugestões de capturas:
 
   COMO USAR
   1. Entre numa chamada do Google Meet.
-  2. Clique no botão de volume no canto inferior esquerdo, ou passe o mouse sobre o vídeo de alguém.
+  2. Clique no botão de volume na barra de controles, ao lado do microfone, ou passe o mouse sobre o vídeo de alguém.
   3. Ajuste o volume da pessoa. Pronto: ele fica salvo para as próximas chamadas.
 
   PRIVACIDADE
