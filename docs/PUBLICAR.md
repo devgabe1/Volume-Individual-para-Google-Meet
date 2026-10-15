@@ -29,7 +29,7 @@
 | Ícone | 128×128 (já em `extension/icons/icon128.png`) | Sim |
 | Capturas de tela | 1280×800 ou 640×400, de 1 a 5 | Sim (pelo menos 1) |
 | Bloco promocional pequeno | 440×280 (já em `store/promo-440x280.png`; gere de novo com `python scripts/build-store-images.py`) | Sim |
-| Bloco promocional grande (marquee) | 1400×560 | Não |
+| Bloco promocional de letreiro (marquee) | 1400×560 (já em `store/promo-1400x560.png`) | Não |
 
 Sugestões de capturas:
 1. Painel aberto durante uma chamada, com várias pessoas e volumes diferentes.
@@ -48,24 +48,43 @@ Sugestões de capturas:
 - **Nome:** Volume Individual para Google Meet
 - **Resumo** (até 132 caracteres):
   > Ajuste o volume de cada participante do Google Meet separadamente, como no Discord.
-- **Descrição:**
-  > Alguém fala muito alto e outra pessoa quase não dá para ouvir? Com o Volume
-  > Individual você ajusta o volume de cada participante do Google Meet
-  > separadamente, de 0% a 200%, ou silencia só uma pessoa.
-  >
-  > • Volume por pessoa, direto no vídeo ou no painel
-  > • Nomes identificados automaticamente
-  > • Volumes lembrados entre chamadas
-  > • Opção para igualar volumes e evitar som estourado
-  > • Painel arrastável que não atrapalha a chamada
-  > • Nada sai do seu navegador: sem contas, sem servidores, sem rastreamento
-  >
-  > Como usar: entre numa chamada e clique no botão de volume no canto inferior
-  > esquerdo, ou passe o mouse sobre o vídeo de alguém.
-  >
-  > Esta extensão não é afiliada ao Google. Google Meet é marca do Google LLC.
+- **Descrição** (copie o bloco inteiro):
+
+  ```text
+  Alguém fala muito alto e outra pessoa quase não dá para ouvir? Com o Volume Individual você ajusta o volume de cada participante do Google Meet separadamente, de 0% a 200%, ou silencia só uma pessoa — como no Discord.
+
+  RECURSOS
+  • Volume por pessoa, direto no vídeo (passe o mouse) ou no painel
+  • Nomes identificados automaticamente pelo indicador de fala do Meet
+  • Volumes lembrados entre chamadas
+  • Opção "Igualar volumes": aproxima quem fala alto de quem fala baixo e evita som estourado
+  • Painel arrastável, que se esconde quando um menu do Meet abre
+  • Página de opções para revisar e apagar os volumes salvos
+
+  COMO USAR
+  1. Entre numa chamada do Google Meet.
+  2. Clique no botão de volume no canto inferior esquerdo, ou passe o mouse sobre o vídeo de alguém.
+  3. Ajuste o volume da pessoa. Pronto: ele fica salvo para as próximas chamadas.
+
+  PRIVACIDADE
+  Tudo acontece no seu navegador. O áudio é processado localmente e nunca é gravado nem enviado. Sem contas, sem servidores, sem anúncios e sem rastreamento.
+
+  Código aberto: https://github.com/devgabe1/Volume-Individual-para-Google-Meet
+
+  Esta extensão não é afiliada ao Google. Google Meet é marca do Google LLC.
+  ```
 - **Categoria:** Comunicação (ou Produtividade)
 - **Idioma:** Português (Brasil)
+
+### Campos extras
+
+| Campo | O que colocar |
+|---|---|
+| URL oficial | **Nenhum** (só serve para sites verificados no Google Search Console) |
+| URL da página inicial | `https://github.com/devgabe1/Volume-Individual-para-Google-Meet` |
+| URL do suporte | `https://github.com/devgabe1/Volume-Individual-para-Google-Meet/issues` |
+| Conteúdo adulto | Desligado |
+| Suporte para itens | Opcional: ativa uma aba de suporte na página da loja. Com a URL de suporte preenchida, pode deixar desativado. |
 
 ### Privacidade
 

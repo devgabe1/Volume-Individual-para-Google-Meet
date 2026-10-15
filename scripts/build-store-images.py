@@ -2,7 +2,7 @@
 
     python scripts/build-store-images.py
 
-Saída: store/promo-440x280.png
+Saída: store/promo-440x280.png e store/promo-1400x560.png
 """
 import subprocess
 from pathlib import Path
@@ -43,6 +43,7 @@ def render(html: Path, out: Path, width: int, height: int):
 def main():
     OUT.mkdir(exist_ok=True)
     render(ROOT / "assets" / "promo-small.html", OUT / "promo-440x280.png", 440, 280)
+    render(ROOT / "assets" / "promo-marquee.html", OUT / "promo-1400x560.png", 1400, 560)
 
 
 if __name__ == "__main__":
