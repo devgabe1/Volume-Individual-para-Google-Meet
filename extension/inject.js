@@ -1259,21 +1259,24 @@
     // se for escura e neutra (cinza). Botões em estado especial (microfone/câmera
     // desligados ficam rosa) nunca servem de cor. A cor pode estar num elemento
     // interno ou num ::before, não no <button>.
+    // Formato e cor vêm dos MESMOS botões (os cinza): o do microfone muda de formato
+    // ao desligar (vira quadrado arredondado), então não serve de referência.
     const styles = new Map();
-    let shape = null;
     for (const b of bar.querySelectorAll('button')) {
       const r = b.getBoundingClientRect();
       if (!isVisible(r) || Math.abs(r.width - r.height) > 2 || r.width < 32 || looksRed(b)) continue;
+      const found = neutralBackground(b);
+      if (!found) continue;
       const cs = getComputedStyle(b);
-      shape ??= { w: r.width, h: r.height, radius: cs.borderRadius };
-      const bg = neutralBackground(b);
-      if (!bg) continue;
-      const entry = styles.get(bg) || { n: 0, bg, fg: isNeutral(cs.color, 150) ? cs.color : NEUTRAL.fg };
+      const key = `${found.bg}|${Math.round(r.width)}|${found.radius}`;
+      const entry = styles.get(key) || {
+        n: 0, w: r.width, h: r.height, radius: found.radius, bg: found.bg,
+        fg: isNeutral(cs.color, 150) ? cs.color : NEUTRAL.fg,
+      };
       entry.n++;
-      styles.set(bg, entry);
+      styles.set(key, entry);
     }
-    const color = [...styles.values()].sort((a, b) => b.n - a.n)[0] || NEUTRAL;
-    const ref = shape ? { ...shape, bg: color.bg, fg: color.fg } : null;
+    const ref = [...styles.values()].sort((a, b) => b.n - a.n)[0] || null;
     return { bar, ref };
   }
 
@@ -1287,15 +1290,27 @@
     return minBright ? Math.min(r, g, b) >= minBright : Math.max(r, g, b) <= 120;
   }
 
+  // { bg, radius } do elemento que pinta o fundo do botão, se o fundo for cinza.
   function neutralBackground(button) {
     const els = [button, ...button.querySelectorAll('*')].slice(0, 5);
     for (const el of els) {
       for (const pseudo of [null, '::before', '::after']) {
-        const bg = getComputedStyle(el, pseudo).backgroundColor;
-        const [, , , a = 1] = rgb(bg);
+        const cs = getComputedStyle(el, pseudo);
+        const [, , , a = 1] = rgb(cs.backgroundColor);
         if (a < 0.3) continue;
-        return isNeutral(bg) ? bg : null; // primeira cor opaca decide (rosa → descarta)
+        // primeira cor opaca decide (rosa → descarta)
+        return isNeutral(cs.backgroundColor) ? { bg: cs.backgroundColor, radius: cs.borderRadius } : null;
       }
+    }
+    return null;
+  }
+
+  // Fundo arredondado que envolve a barra (a "moldura"): a própria barra ou um ancestral.
+  function barFrame(bar) {
+    for (let el = bar, i = 0; el && el !== document.body && i < 5; el = el.parentElement, i++) {
+      const cs = getComputedStyle(el);
+      const [, , , a = 1] = rgb(cs.backgroundColor);
+      if (a > 0.5 && parseFloat(cs.borderRadius) > 0) return el;
     }
     return null;
   }
@@ -1344,6 +1359,7 @@
     root.append(h('style', { textContent: `
       :host { position: fixed; z-index: 2147483646; display: none; }
       :host(.on) { display: block; }
+      :host(.out) { visibility: hidden; }
       button {
         position: relative; display: grid; place-items: center; padding: 0; border: none; cursor: pointer;
         width: var(--w, 48px); height: var(--h, 48px); border-radius: var(--r, 50%);
@@ -1380,8 +1396,16 @@
       if (!dock.docked || !bar || !bar.isConnected) return;
       const lay = barLayout(bar);
       if (lay) {
-        host.style.left = Math.round(lay.first.left - lay.gap - w) + 'px';
-        host.style.top = Math.round(lay.first.top + lay.first.height / 2 - btn.offsetHeight / 2) + 'px';
+        const left = Math.round(lay.first.left - lay.gap - w);
+        const top = Math.round(lay.first.top + lay.first.height / 2 - btn.offsetHeight / 2);
+        host.style.left = left + 'px';
+        host.style.top = top + 'px';
+        // Com os seletores de microfone/câmera abertos, a moldura muda de largura e o
+        // recuo deixa de valer: em vez de aparecer para fora dela, o botão some.
+        const frameEl = barFrame(bar);
+        const f = frameEl && frameEl.getBoundingClientRect();
+        const fits = !f || (left >= f.left && left + w <= f.right && top >= f.top && top + btn.offsetHeight <= f.bottom);
+        host.classList.toggle('out', !fits);
       }
       frame = requestAnimationFrame(place);
     }
