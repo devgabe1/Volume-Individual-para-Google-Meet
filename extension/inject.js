@@ -325,19 +325,56 @@
     return v;
   }
 
-  function currentVoiceOf(receiver) {
-    // CSRC = participante original deste canal. Um mesmo pacote pode listar mais de
-    // um CSRC (todos com o mesmo timestamp), então entre os que acabaram de tocar
-    // escolhemos o de maior nível de áudio: é quem está falando de fato.
-    const csrcs = receiver.getContributingSources ? receiver.getContributingSources() : [];
+  // O Meet coloca nos pacotes com fala, junto do CSRC real da pessoa, um CSRC
+  // marcador (visto: 42) com o mesmo nível e timestamp, em TODOS os canais. Ele não é
+  // uma pessoa: se virasse uma "voz", o volume dela valeria para todo mundo.
+  // Marcador = valor pequeno demais para um SSRC real (que é aleatório de 32 bits)
+  // ou CSRC que aparece em mais de um canal ao mesmo tempo.
+  const markerCsrcs = new Set();
+  const overlapHits = new Map(); // csrc -> vezes em que tocou em 2+ canais no mesmo instante
+  const MARKER_HITS = 3;
+  const FRESH_MS = 200;
+
+  // Recebe os CSRCs de todos os canais num mesmo instante. Timestamps do Chrome são
+  // de relógio absoluto (timeOrigin + now), então dá para comparar entre canais.
+  // Uma pessoa trocando de canal nunca está "fresca" em dois ao mesmo tempo.
+  function detectMarkers(lists) {
+    const nowTs = performance.timeOrigin + performance.now();
+    const freshOn = new Map();
+    for (const list of lists) {
+      for (const s of list) {
+        if (markerCsrcs.has(s.source)) continue;
+        if (s.source < 65536) { markerCsrcs.add(s.source); continue; }
+        if (nowTs - s.timestamp < FRESH_MS) freshOn.set(s.source, (freshOn.get(s.source) || 0) + 1);
+      }
+    }
+    for (const [source, n] of freshOn) {
+      if (n < 2) continue;
+      const hits = (overlapHits.get(source) || 0) + 1;
+      overlapHits.set(source, hits);
+      if (hits >= MARKER_HITS) {
+        markerCsrcs.add(source);
+        console.info(LOG, `CSRC ${source} toca em vários canais ao mesmo tempo: ignorado (marcador do Meet)`);
+      }
+    }
+  }
+
+  function currentVoiceOf(pipe, all) {
+    const receiver = pipe.receiver;
+    // CSRC = participante original deste canal. Entre os que acabaram de tocar
+    // (fora os marcadores), o de maior nível de áudio é quem está falando.
     let latest = -Infinity;
-    for (const s of csrcs) latest = Math.max(latest, s.timestamp);
+    for (const s of all) latest = Math.max(latest, s.timestamp);
+    const csrcs = all.filter((s) => !markerCsrcs.has(s.source));
     let best = null;
     for (const s of csrcs) {
       if (latest - s.timestamp >= HANDOFF_MS) continue;
       if (!best || (s.audioLevel ?? 0) > (best.audioLevel ?? 0) ||
           ((s.audioLevel ?? 0) === (best.audioLevel ?? 0) && s.timestamp > best.timestamp)) best = s;
     }
+    // Canal em silêncio: o CSRC real continua chegando (pacotes de silêncio), só
+    // talvez sem timestamp recente. Fica com o mais recente que não é marcador.
+    if (!best) for (const s of csrcs) if (!best || s.timestamp > best.timestamp) best = s;
     if (best) return { id: 'c' + best.source, level: best.audioLevel ?? 0, timestamp: best.timestamp };
 
     // Sem CSRC: o canal em si representa uma fonte (SSRC).
@@ -350,8 +387,13 @@
 
   function tick() {
     const now = performance.now();
+    const lists = new Map();
     for (const pipe of pipes) {
-      const info = currentVoiceOf(pipe.receiver);
+      lists.set(pipe, pipe.receiver.getContributingSources ? pipe.receiver.getContributingSources() : []);
+    }
+    detectMarkers(lists.values());
+    for (const pipe of pipes) {
+      const info = currentVoiceOf(pipe, lists.get(pipe));
       if (!info) continue;
       const v = getVoice(info.id);
       v.level = info.level;
@@ -551,6 +593,7 @@
       channels: pipes.size,
       audioElements: document.querySelectorAll('audio').length,
       audioContext: ctx ? ctx.state : null,
+      markerCsrcs: [...markerCsrcs],
       settings: { master, normalize: store.normalize, autoName: store.autoName },
       headerExtensions: [...pipes].map((p) => {
         try { return { channel: channelOf(p), uris: p.receiver.getParameters().headerExtensions.map((e) => e.uri) }; }
