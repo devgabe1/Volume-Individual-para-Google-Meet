@@ -23,7 +23,8 @@
   const ACTIVE_MS = 400;
   const LEARN_MS = 150;         // frequência da amostragem voz x quadro
   const LEARN_WINDOW_MS = 300;  // "ativo agora" = mudou nos últimos 300ms
-  const MIN_SAMPLES = 8;        // amostras mínimas antes de dar nome a uma voz
+  const MIN_SAMPLES = 12;       // amostras mínimas antes de dar nome a uma voz
+  const RENAME_SAMPLES = 40;    // ...e antes de trocar o nome automático de uma voz
   const BRIDGE = 'meet-volume'; // marcador das mensagens trocadas com bridge.js
   const LEGACY_KEYS = { store: 'meetVolume:v1', ui: 'meetVolume:ui' };
 
@@ -281,6 +282,14 @@
     v.dirty = true;
     if (!name.trim()) return;
     const saved = store.people[nameKey(name)];
+    // Renomeação automática = a voz tinha sido confundida com outra pessoa. O volume
+    // atual era o dessa outra pessoa: não pode ser copiado para o novo nome.
+    if (renaming && source === 'auto') {
+      v.volume = saved ? saved.volume : 1;
+      v.muted = saved ? saved.muted : false;
+      v.touched = false;
+      return;
+    }
     // Se o usuário mexeu no volume de uma voz ainda sem nome, esse ajuste vale mais
     // que o salvo. Numa renomeação, o volume ajustado era da pessoa antiga.
     if (saved && !(v.touched && !renaming)) {
@@ -305,23 +314,23 @@
   }
 
   function currentVoiceOf(receiver) {
-    // CSRC = participante original misturado neste canal. Pega o mais recente.
+    // CSRC = participante original deste canal. Um mesmo pacote pode listar mais de
+    // um CSRC (todos com o mesmo timestamp), então entre os que acabaram de tocar
+    // escolhemos o de maior nível de áudio: é quem está falando de fato.
     const csrcs = receiver.getContributingSources ? receiver.getContributingSources() : [];
+    let latest = -Infinity;
+    for (const s of csrcs) latest = Math.max(latest, s.timestamp);
     let best = null;
-    for (const s of csrcs) if (!best || s.timestamp > best.timestamp) best = s;
-    if (best) {
-      // Vozes que tocaram neste canal nos últimos HANDOFF_MS: durante uma troca de
-      // pessoa, as duas aparecem aqui.
-      const recent = csrcs.filter((s) => best.timestamp - s.timestamp < HANDOFF_MS).map((s) => 'c' + s.source);
-      return { id: 'c' + best.source, level: best.audioLevel ?? 0, timestamp: best.timestamp, recent };
+    for (const s of csrcs) {
+      if (latest - s.timestamp >= HANDOFF_MS) continue;
+      if (!best || (s.audioLevel ?? 0) > (best.audioLevel ?? 0) ||
+          ((s.audioLevel ?? 0) === (best.audioLevel ?? 0) && s.timestamp > best.timestamp)) best = s;
     }
+    if (best) return { id: 'c' + best.source, level: best.audioLevel ?? 0, timestamp: best.timestamp };
 
     // Sem CSRC: o canal em si representa uma fonte (SSRC).
     const ssrcs = receiver.getSynchronizationSources ? receiver.getSynchronizationSources() : [];
-    if (ssrcs.length) {
-      const id = 's' + ssrcs[0].source;
-      return { id, level: ssrcs[0].audioLevel ?? 0, timestamp: ssrcs[0].timestamp, recent: [id] };
-    }
+    if (ssrcs.length) return { id: 's' + ssrcs[0].source, level: ssrcs[0].audioLevel ?? 0, timestamp: ssrcs[0].timestamp };
     return null;
   }
 
@@ -337,17 +346,20 @@
       if (info.timestamp !== pipe.lastTimestamp && info.level > 0.01) v.lastActive = now;
       pipe.lastTimestamp = info.timestamp;
 
-      // Na troca de pessoa no canal, o volume novo chega alguns ms atrasado. Para não
-      // tocar o começo da fala de alguém com o volume alto de quem falava antes,
-      // usamos o MENOR volume entre as vozes que acabaram de passar pelo canal.
-      let target = targetOf(v);
-      for (const id of info.recent) {
-        const other = voices.get(id);
-        if (other && other !== v) target = Math.min(target, targetOf(other));
+      const switched = pipe.currentVoice !== info.id;
+      if (switched) {
+        pipe.prevVoice = pipe.currentVoice;
+        pipe.switchedAt = now;
+        pipe.currentVoice = info.id;
       }
 
-      const switched = pipe.currentVoice !== info.id;
-      pipe.currentVoice = info.id;
+      // Na troca de pessoa no canal, o volume novo chega alguns ms atrasado. Para não
+      // tocar o começo da fala de alguém com o volume alto de quem falava antes,
+      // usamos o MENOR dos dois volumes, só durante HANDOFF_MS depois da troca.
+      let target = targetOf(v);
+      const prev = pipe.prevVoice && voices.get(pipe.prevVoice);
+      if (prev && now - pipe.switchedAt < HANDOFF_MS) target = Math.min(target, targetOf(prev));
+
       if (switched || Math.abs(pipe.gain.gain.value - target) > 0.001) {
         // Rampa curta na troca (sem clique), mais suave em ajustes normais.
         if (switched) pipe.gain.gain.cancelScheduledValues(ctx.currentTime);
@@ -453,13 +465,38 @@
     }
     if (!best || best.rate < 0.5 || best.lift < 0.3) return;
     if (second && best.lift - second.lift < 0.15) return;
+    if (best.pid === v.pid) { v.autoLift = best.lift; return; }
 
-    v.pid = best.pid;
+    // Trocar o nome de uma voz já identificada exige mais evidência que nomear a primeira vez.
+    if (v.nameSource === 'auto' && (s.n < RENAME_SAMPLES || best.lift < 0.5)) return;
+
+    // Um quadro = uma voz. Se outra voz já tem este quadro, fica com quem tem mais evidência.
+    for (const u of voices.values()) {
+      if (u === v || u.pid !== best.pid || u.nameSource !== 'auto') continue;
+      if ((u.autoLift || 0) >= best.lift) return;
+      console.info(LOG, `${u.label} deixou de ser "${u.name}" (${v.label} combina melhor)`);
+      u.pid = null;
+      u.autoLift = 0;
+      clearAutoName(u);
+    }
+
     const name = tileName(best.pid);
-    if (name && name !== v.name) {
+    if (!name) return;
+    v.pid = best.pid;
+    v.autoLift = best.lift;
+    if (name !== v.name) {
       console.info(LOG, `${v.label} identificada como "${name}"`);
       setName(v, name, 'auto');
     }
+  }
+
+  // Desfaz um nome automático errado: a voz volta a ser "Voz N" com volume padrão
+  // (o volume que ela tinha era o da pessoa com quem foi confundida).
+  function clearAutoName(v) {
+    v.name = '';
+    v.nameSource = '';
+    if (!v.touched) { v.volume = 1; v.muted = false; }
+    v.dirty = true;
   }
 
   // ---------------------------------------------------------------- avisos
@@ -516,6 +553,17 @@
     baseline,
     health,
     tileName,
+    // Estado de cada canal de áudio: quem a extensão acha que está nele e o que o Meet informa.
+    channels: () => [...pipes].map((p) => ({
+      voice: p.currentVoice,
+      name: voices.get(p.currentVoice)?.name || voices.get(p.currentVoice)?.label,
+      gain: +p.gain.gain.value.toFixed(3),
+      csrcs: ((list) => {
+        const latest = Math.max(...list.map((s) => s.timestamp));
+        // behindMs: quanto este CSRC está atrás do mais recente do canal (0 = tocando agora)
+        return list.map((s) => ({ id: 'c' + s.source, level: +(s.audioLevel ?? 0).toFixed(3), behindMs: Math.round(latest - s.timestamp) }));
+      })(p.receiver.getContributingSources?.() || []),
+    })),
     get master() { return master; },
     get active() { return pipes.size; },
   };

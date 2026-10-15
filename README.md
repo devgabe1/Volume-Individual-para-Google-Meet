@@ -86,6 +86,7 @@ Para depurar, use o console da aba do Meet:
 __meetVolume.voices    // vozes detectadas
 __meetVolume.health()  // avisos atuais
 __meetVolume.stats     // estatísticas da identificação automática
+__meetVolume.channels() // canais de áudio: voz atual, ganho e CSRCs informados pelo Meet
 __meetVolume.tileName(document.querySelector('[data-participant-id]').dataset.participantId)
                        // nome lido de um quadro
 ```
