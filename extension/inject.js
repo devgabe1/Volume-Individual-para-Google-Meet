@@ -1219,11 +1219,15 @@
   // ---------------------------------------------------------------- botão na barra do Meet
   // As classes do Meet são embaralhadas e mudam a cada versão, então a barra é
   // encontrada pela aparência: o botão de sair da chamada é o único botão largo e
-  // vermelho no rodapé. A barra é o menor ancestral dele com vários botões, e o nosso
-  // botão entra antes do primeiro grupo (o do microfone), copiando o visual de um
-  // botão redondo vizinho.
+  // vermelho no rodapé, e a barra é o menor ancestral dele com vários botões.
+  //
+  // NÃO inserimos nada dentro da barra: o Meet redesenha os filhos dela e um elemento
+  // estranho ali fez o grupo do microfone sumir. Em vez disso, a barra ganha um recuo
+  // à esquerda (regra CSS via atributo data-*, sem tocar nos filhos nem no style dela)
+  // e o nosso botão fica por cima, em position: fixed, ocupando esse recuo.
   const isVisible = (r) => r.width > 0 && r.height > 0;
   const rgb = (c) => (c.match(/\d+(\.\d+)?/g) || []).map(Number);
+  const BAR_ATTR = 'data-meet-volume-bar';
 
   function looksRed(el) {
     for (const e of [el, ...el.querySelectorAll('*')].slice(0, 6)) {
@@ -1249,29 +1253,31 @@
     while (bar && bar !== document.body && countButtons(bar) < 5) bar = bar.parentElement;
     if (!bar || bar === document.body || bar.getBoundingClientRect().height > 160) return null;
 
-    // Filho da barra que contém o botão mais à esquerda = grupo do microfone.
-    let first = null, firstLeft = Infinity;
-    for (const child of bar.children) {
-      if (child.id === 'meet-volume-dock') continue;
-      for (const b of child.querySelectorAll('button')) {
-        const r = b.getBoundingClientRect();
-        if (isVisible(r) && r.left < firstLeft) { firstLeft = r.left; first = child; }
-      }
-    }
-    if (!first) return null;
-
-    // Visual de referência: um botão redondo, nem vermelho nem transparente.
-    let ref = null;
+    // Visual de referência: a cor mais comum entre os botões redondos da barra (a
+    // neutra). O primeiro botão pode estar num estado especial (ex.: câmera desligada,
+    // rosa), por isso não serve.
+    const styles = new Map();
     for (const b of bar.querySelectorAll('button')) {
       const r = b.getBoundingClientRect();
-      const [, , , a = 1] = rgb(getComputedStyle(b).backgroundColor);
-      if (isVisible(r) && Math.abs(r.width - r.height) <= 2 && r.width >= 32 && a > 0.3 && !looksRed(b)) { ref = b; break; }
+      const cs = getComputedStyle(b);
+      const [, , , a = 1] = rgb(cs.backgroundColor);
+      if (!isVisible(r) || Math.abs(r.width - r.height) > 2 || r.width < 32 || a < 0.3 || looksRed(b)) continue;
+      const key = cs.backgroundColor;
+      const entry = styles.get(key) || { n: 0, w: r.width, h: r.height, radius: cs.borderRadius, bg: cs.backgroundColor, fg: cs.color };
+      entry.n++;
+      styles.set(key, entry);
     }
-    // Espaço entre grupos: distância entre os dois primeiros filhos visíveis.
-    const kids = [...bar.children].filter((c) => c.id !== 'meet-volume-dock' && isVisible(c.getBoundingClientRect()))
-      .sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
-    const gap = kids.length > 1 ? kids[1].getBoundingClientRect().left - kids[0].getBoundingClientRect().right : 8;
-    return { bar, first, ref, gap: Math.min(Math.max(gap, 4), 24) };
+    const ref = [...styles.values()].sort((a, b) => b.n - a.n)[0] || null;
+    return { bar, ref };
+  }
+
+  // Filho da barra mais à esquerda (o grupo do microfone) e o espaço entre os grupos.
+  function barLayout(bar) {
+    const kids = [...bar.children].map((c) => ({ c, r: c.getBoundingClientRect() }))
+      .filter((k) => isVisible(k.r)).sort((a, b) => a.r.left - b.r.left);
+    if (!kids.length) return null;
+    const gap = kids.length > 1 ? kids[1].r.left - kids[0].r.right : 8;
+    return { first: kids[0].r, gap: Math.min(Math.max(gap, 4), 24) };
   }
 
   function buildDock(onClick) {
@@ -1279,7 +1285,8 @@
     host.id = 'meet-volume-dock';
     const root = host.attachShadow({ mode: 'open' });
     root.append(h('style', { textContent: `
-      :host { display: inline-flex; align-items: center; flex: none; }
+      :host { position: fixed; z-index: 2147483646; display: none; }
+      :host(.on) { display: block; }
       button {
         position: relative; display: grid; place-items: center; padding: 0; border: none; cursor: pointer;
         width: var(--w, 48px); height: var(--h, 48px); border-radius: var(--r, 50%);
@@ -1295,6 +1302,32 @@
     ` }));
     const btn = h('button', { title: 'Volume individual', ariaLabel: 'Volume individual', onclick: onClick }, icon('volumeUp', 24));
     root.append(btn);
+    document.documentElement.append(host);
+
+    // Regra que abre o espaço na barra. Fica no <head> da página (fora do shadow DOM).
+    const rule = document.createElement('style');
+    rule.id = 'meet-volume-bar-style';
+
+    let bar = null, w = 48, frame = 0;
+
+    function release() {
+      if (bar) bar.removeAttribute(BAR_ATTR);
+      bar = null;
+      rule.textContent = '';
+      host.classList.remove('on');
+    }
+
+    // Reposiciona o botão sobre o recuo a cada quadro (a barra anima e muda de lugar).
+    function place() {
+      frame = 0;
+      if (!dock.docked || !bar || !bar.isConnected) return;
+      const lay = barLayout(bar);
+      if (lay) {
+        host.style.left = Math.round(lay.first.left - lay.gap - w) + 'px';
+        host.style.top = Math.round(lay.first.top + lay.first.height / 2 - btn.offsetHeight / 2) + 'px';
+      }
+      frame = requestAnimationFrame(place);
+    }
 
     const dock = {
       host,
@@ -1307,23 +1340,31 @@
         const was = dock.docked;
         const found = store.dock !== false ? findMeetBar() : null;
         if (!found) {
-          host.remove();
+          release();
           dock.docked = false;
           return was !== dock.docked;
         }
-        const { bar, first, ref, gap } = found;
-        if (host.parentElement !== bar || host.nextElementSibling !== first) bar.insertBefore(host, first);
-        host.style.marginRight = gap + 'px';
+        if (found.bar !== bar) { release(); bar = found.bar; }
+        const { ref } = found;
         if (ref) {
-          const r = ref.getBoundingClientRect();
-          const cs = getComputedStyle(ref);
-          host.style.setProperty('--w', Math.round(r.width) + 'px');
-          host.style.setProperty('--h', Math.round(r.height) + 'px');
-          host.style.setProperty('--r', cs.borderRadius);
-          host.style.setProperty('--bg', cs.backgroundColor);
-          host.style.setProperty('--fg', cs.color);
+          w = Math.round(ref.w);
+          host.style.setProperty('--w', w + 'px');
+          host.style.setProperty('--h', Math.round(ref.h) + 'px');
+          host.style.setProperty('--r', ref.radius);
+          host.style.setProperty('--bg', ref.bg);
+          host.style.setProperty('--fg', ref.fg);
         }
+        const lay = barLayout(bar);
+        if (!bar.hasAttribute(BAR_ATTR)) {
+          // Recuo = recuo original + nosso botão + o espaço entre grupos.
+          const pad = parseFloat(getComputedStyle(bar).paddingLeft) || 0;
+          bar.setAttribute(BAR_ATTR, '');
+          rule.textContent = `[${BAR_ATTR}] { padding-left: ${Math.round(pad + w + (lay ? lay.gap : 8))}px !important; }`;
+        }
+        if (!rule.isConnected) (document.head || document.documentElement).append(rule);
+        host.classList.add('on');
         dock.docked = true;
+        if (!frame) frame = requestAnimationFrame(place);
         return was !== dock.docked;
       },
     };
