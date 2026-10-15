@@ -644,7 +644,9 @@
         id: v.id, name: nameOf(v.name.trim()) || v.label, source: v.nameSource || null, tile: tileOf(v.pid),
         volume: v.volume, muted: v.muted, activeMsAgo: v.lastActive ? Math.round(now - v.lastActive) : null,
       }));
-      samples.push({ t: Math.round(now - t0), channels, tiles, voices: vs });
+      // Barra de controles a cada ~0,5 s (para ver o que muda ao abrir os seletores).
+      const bar = samples.length % 5 === 0 ? describeBar() : undefined;
+      samples.push({ t: Math.round(now - t0), channels, tiles, voices: vs, bar });
       if (onProgress) onProgress(Math.ceil(seconds - (performance.now() - t0) / 1000));
       await wait(100);
     }
@@ -1253,22 +1255,77 @@
     while (bar && bar !== document.body && countButtons(bar) < 5) bar = bar.parentElement;
     if (!bar || bar === document.body || bar.getBoundingClientRect().height > 160) return null;
 
-    // Visual de referência: a cor mais comum entre os botões redondos da barra (a
-    // neutra). O primeiro botão pode estar num estado especial (ex.: câmera desligada,
-    // rosa), por isso não serve.
+    // Visual de referência: tamanho e formato de um botão redondo da barra; cor só
+    // se for escura e neutra (cinza). Botões em estado especial (microfone/câmera
+    // desligados ficam rosa) nunca servem de cor. A cor pode estar num elemento
+    // interno ou num ::before, não no <button>.
     const styles = new Map();
+    let shape = null;
     for (const b of bar.querySelectorAll('button')) {
       const r = b.getBoundingClientRect();
+      if (!isVisible(r) || Math.abs(r.width - r.height) > 2 || r.width < 32 || looksRed(b)) continue;
       const cs = getComputedStyle(b);
-      const [, , , a = 1] = rgb(cs.backgroundColor);
-      if (!isVisible(r) || Math.abs(r.width - r.height) > 2 || r.width < 32 || a < 0.3 || looksRed(b)) continue;
-      const key = cs.backgroundColor;
-      const entry = styles.get(key) || { n: 0, w: r.width, h: r.height, radius: cs.borderRadius, bg: cs.backgroundColor, fg: cs.color };
+      shape ??= { w: r.width, h: r.height, radius: cs.borderRadius };
+      const bg = neutralBackground(b);
+      if (!bg) continue;
+      const entry = styles.get(bg) || { n: 0, bg, fg: isNeutral(cs.color, 150) ? cs.color : NEUTRAL.fg };
       entry.n++;
-      styles.set(key, entry);
+      styles.set(bg, entry);
     }
-    const ref = [...styles.values()].sort((a, b) => b.n - a.n)[0] || null;
+    const color = [...styles.values()].sort((a, b) => b.n - a.n)[0] || NEUTRAL;
+    const ref = shape ? { ...shape, bg: color.bg, fg: color.fg } : null;
     return { bar, ref };
+  }
+
+  // Cinza dos botões do Meet no tema escuro, usado quando não dá para ler da página.
+  const NEUTRAL = { bg: 'rgb(51, 53, 55)', fg: 'rgb(227, 227, 227)' };
+
+  // Cor sem saturação (cinza). minBright: exige claro (ícone); senão exige escuro (fundo).
+  function isNeutral(color, minBright) {
+    const [r, g, b, a = 1] = rgb(color);
+    if (a < 0.3 || Math.max(r, g, b) - Math.min(r, g, b) > 24) return false;
+    return minBright ? Math.min(r, g, b) >= minBright : Math.max(r, g, b) <= 120;
+  }
+
+  function neutralBackground(button) {
+    const els = [button, ...button.querySelectorAll('*')].slice(0, 5);
+    for (const el of els) {
+      for (const pseudo of [null, '::before', '::after']) {
+        const bg = getComputedStyle(el, pseudo).backgroundColor;
+        const [, , , a = 1] = rgb(bg);
+        if (a < 0.3) continue;
+        return isNeutral(bg) ? bg : null; // primeira cor opaca decide (rosa → descarta)
+      }
+    }
+    return null;
+  }
+
+  // Para o diagnóstico: a barra, seus ancestrais (onde costuma estar o fundo
+  // arredondado) e seus filhos, com posição e estilos que afetam o layout.
+  function describeBar() {
+    const found = findMeetBar();
+    if (!found) return null;
+    const desc = (el) => {
+      const r = el.getBoundingClientRect();
+      const cs = getComputedStyle(el);
+      return {
+        tag: el.tagName.toLowerCase(),
+        rect: [r.left, r.top, r.width, r.height].map(Math.round),
+        bg: cs.backgroundColor, radius: cs.borderRadius, display: cs.display, position: cs.position,
+        padL: cs.paddingLeft, width: cs.width, inlineWidth: el.style.width || null, overflow: cs.overflow,
+        justify: cs.justifyContent, kids: el.children.length, marked: el.hasAttribute(BAR_ATTR),
+      };
+    };
+    const ancestors = [];
+    for (let el = found.bar.parentElement, i = 0; el && el !== document.body && i < 6; el = el.parentElement, i++) ancestors.push(desc(el));
+    const dockBtn = document.getElementById('meet-volume-dock')?.shadowRoot?.querySelector('button');
+    const d = dockBtn?.getBoundingClientRect();
+    return {
+      bar: desc(found.bar),
+      children: [...found.bar.children].map(desc),
+      ancestors,
+      dockButton: d ? [d.left, d.top, d.width, d.height].map(Math.round) : null,
+    };
   }
 
   // Filho da barra mais à esquerda (o grupo do microfone) e o espaço entre os grupos.
