@@ -377,8 +377,10 @@
     if (!best) for (const s of csrcs) if (!best || s.timestamp > best.timestamp) best = s;
     if (best) return { id: 'c' + best.source, level: best.audioLevel ?? 0, timestamp: best.timestamp };
 
-    // Sem CSRC: o canal em si representa uma fonte (SSRC).
-    const ssrcs = receiver.getSynchronizationSources ? receiver.getSynchronizationSources() : [];
+    // Sem CSRC: o canal em si representa uma fonte (SSRC). Não vale para SSRCs
+    // pequenos, que são canais virtuais (o Meet usa 6666, 6667...), não pessoas.
+    const ssrcs = (receiver.getSynchronizationSources ? receiver.getSynchronizationSources() : [])
+      .filter((s) => s.source >= 65536);
     if (ssrcs.length) return { id: 's' + ssrcs[0].source, level: ssrcs[0].audioLevel ?? 0, timestamp: ssrcs[0].timestamp };
     return null;
   }
@@ -509,8 +511,15 @@
     bump(s, activeTiles);
     if (s.n < MIN_SAMPLES || v.nameSource === 'manual' || !store.autoName) return;
 
-    let best = null, second = null;
+    // Só disputam quadros com nome legível: um quadro sem nome (ex.: o seu, ou um
+    // vazio) nunca pode ser atribuído e só atrasaria a decisão.
+    const names = new Map();
     for (const pid of pids) {
+      const n = tileName(pid);
+      if (n) names.set(pid, n);
+    }
+    let best = null, second = null;
+    for (const pid of names.keys()) {
       const rate = (s.hits.get(pid) || 0) / s.n;
       const base = baseline.n ? (baseline.hits.get(pid) || 0) / baseline.n : 0;
       const cand = { pid, rate, lift: rate - base };
@@ -534,8 +543,7 @@
       clearAutoName(u);
     }
 
-    const name = tileName(best.pid);
-    if (!name) return;
+    const name = names.get(best.pid);
     v.pid = best.pid;
     v.autoLift = best.lift;
     if (name !== v.name) {
@@ -665,6 +673,7 @@
   // Detecta quando o Meet mudou algo por dentro e a extensão deixou de funcionar.
   let remoteSince = 0;      // primeira vez que vimos áudio remoto (RTCPeerConnection)
   let unknownAudioSince = 0; // <audio> tocando stream que não passou pelo nosso hook
+  let noTilesSince = 0;      // quadros [data-participant-id] ausentes desde
 
   function health() {
     const now = performance.now();
@@ -692,7 +701,11 @@
       issues.push({ level: 'error', text: 'Não consegui interceptar a conexão de áudio do Meet. Recarregue a página; se continuar, o Meet mudou.' });
     }
 
-    const hasTiles = !!document.querySelector('[data-participant-id]');
+    // Os quadros somem por instantes (troca de layout, apresentação, aba em segundo
+    // plano): só avisa se ficarem ausentes por um tempo.
+    if (document.querySelector('[data-participant-id]')) noTilesSince = 0;
+    else if (!noTilesSince) noTilesSince = now;
+    const hasTiles = !noTilesSince || now - noTilesSince < 15000;
     let learned = false, unnamed = false;
     for (const [id, s] of stats) {
       const v = voices.get(id);
@@ -1127,7 +1140,9 @@
       fab.classList.toggle('alert', issues.some((i) => i.level === 'error'));
       warnings.replaceChildren(...issues.map((i) => h('div', { className: `warn ${i.level}`, textContent: i.text })));
       for (const i of issues) {
-        if (!warned.has(i.text)) { warned.add(i.text); console.warn(LOG, i.text); }
+        // console.info (e não warn): avisos já aparecem no painel, e console.warn de
+        // content script vira "erro" na página chrome://extensions.
+        if (!warned.has(i.text)) { warned.add(i.text); console.info(LOG, i.text); }
       }
     }, 1000);
 
