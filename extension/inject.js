@@ -1198,9 +1198,11 @@
     vol.el.prepend(mute);
     const el = h('div', { className: 'tile', hidden: true }, name, sub, vol.el);
 
-    function refresh() {
+    // force: trocou de pessoa. O slider pode estar com foco desde o último ajuste
+    // (de outra pessoa); sem forçar, ele continuaria mostrando aquele valor.
+    function refresh(force = false) {
       const p = personOf(current) || { volume: 1, muted: false };
-      if (el.getRootNode().activeElement !== vol.range) vol.set(p.volume);
+      if (force || el.getRootNode().activeElement !== vol.range) vol.set(p.volume);
       setMuteIcon(mute, p.muted);
       const key = nameKey(current);
       const heard = [...voices.values()].some((v) => v.name.trim() && nameKey(v.name) === key);
@@ -1212,9 +1214,11 @@
     function showFor(tileEl, avoid = []) {
       const n = tileName(tileEl.getAttribute('data-participant-id'));
       if (!n) return false;
+      const changed = n !== current || el.hidden;
+      if (changed && el.getRootNode().activeElement === vol.range) vol.range.blur();
       current = n;
       name.textContent = n;
-      refresh();
+      refresh(changed);
       el.hidden = false;
 
       const r = tileEl.getBoundingClientRect();
