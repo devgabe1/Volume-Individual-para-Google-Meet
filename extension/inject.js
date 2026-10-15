@@ -563,6 +563,7 @@
     }
     .fab:hover { background: #5f6368; }
     .fab.dragging { cursor: grabbing; }
+    .behind { visibility: hidden !important; }
     .fab.alert::after {
       content: ''; position: absolute; top: 2px; right: 2px; width: 10px; height: 10px;
       border-radius: 50%; background: #ea4335; border: 2px solid #3c4043;
@@ -841,6 +842,32 @@
     }
 
     setInterval(() => { if (!panel.hidden) { render(); layout(); } }, 250);
+
+    // ---- nunca cobrir menus e janelas do Meet
+    // Nossa UI fica no z-index máximo para não sumir atrás dos vídeos. Quando o Meet
+    // abre um menu/diálogo (identificado pelo papel de acessibilidade, que é estável)
+    // e ele encosta em algo nosso, escondemos só o que está por cima até ele fechar.
+    const MEET_POPUPS = '[role="menu"], [role="listbox"], [role="dialog"], [role="alertdialog"], [aria-modal="true"]';
+    const overlaps = (a, b) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+
+    function yieldToMeetPopups() {
+      const vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
+      const popups = [];
+      for (const el of document.querySelectorAll(MEET_POPUPS)) {
+        const r = el.getBoundingClientRect();
+        if (!r.width || !r.height) continue;
+        if (r.width >= vw * 0.95 && r.height >= vh * 0.95) continue; // contêiner de página, não um menu
+        const cs = getComputedStyle(el);
+        if (cs.visibility === 'hidden' || cs.opacity === '0') continue;
+        popups.push(r);
+      }
+      for (const el of [fab, panel, tile.el]) {
+        if (el.hidden) { el.classList.remove('behind'); continue; }
+        const r = el.getBoundingClientRect();
+        el.classList.toggle('behind', popups.some((p) => overlaps(r, p)));
+      }
+    }
+    setInterval(yieldToMeetPopups, 150);
 
     // ---- avisos
     const warned = new Set();
