@@ -384,18 +384,31 @@
 
   const ICON_TEXT = /^[a-z0-9_]+$/; // ícones Material são texto tipo "mic_off"
 
+  // Textos de botões, dicas e menus do quadro ("Fixar Fulano na tela", "Mais opções"...).
+  const CONTROL_TEXT = 'button, [role="button"], [role="tooltip"], [role="menu"], [role="menuitem"], [aria-hidden="true"]';
+
   function tileName(pid) {
+    const candidates = [], all = [];
     for (const tile of document.querySelectorAll(`[data-participant-id="${CSS.escape(pid)}"]`)) {
       const walker = document.createTreeWalker(tile, NodeFilter.SHOW_TEXT);
       for (let node = walker.nextNode(); node; node = walker.nextNode()) {
         const text = node.textContent.trim();
         if (!text || text.length > 60 || ICON_TEXT.test(text)) continue;
         const parent = node.parentElement;
-        if (!parent || !parent.getClientRects().length) continue; // tooltips escondidos
-        return text;
+        if (!parent) continue;
+        const r = parent.getBoundingClientRect();
+        all.push(text);
+        if (r.width <= 1 || r.height <= 1) continue; // escondido ou só para leitor de tela
+        if (parent.closest(CONTROL_TEXT)) continue;
+        candidates.push(text);
       }
     }
-    return null;
+    if (!candidates.length) return null;
+    // Se um texto aparece dentro de outros ("Ana" em "Fixar Ana na tela"), é o nome.
+    const score = (c) => all.filter((o) => o !== c && o.includes(c)).length;
+    let best = candidates[0];
+    for (const c of candidates) if (score(c) > score(best)) best = c;
+    return best;
   }
 
   function bump(bucket, activeTiles) {
@@ -502,6 +515,7 @@
     stats,
     baseline,
     health,
+    tileName,
     get master() { return master; },
     get active() { return pipes.size; },
   };
@@ -866,6 +880,12 @@
         const r = el.getBoundingClientRect();
         el.classList.toggle('behind', popups.some((p) => overlaps(r, p)));
       }
+      // O painel e o botão também têm prioridade sobre o controle do quadro.
+      if (!tile.el.hidden) {
+        const r = tile.el.getBoundingClientRect();
+        const mine = [fab, panel].filter((el) => !el.hidden).map((el) => el.getBoundingClientRect());
+        if (mine.some((m) => overlaps(r, m))) tile.el.classList.add('behind');
+      }
     }
     setInterval(yieldToMeetPopups, 150);
 
@@ -881,18 +901,23 @@
     }, 1000);
 
     // ---- controle ao passar o mouse sobre o quadro de alguém
-    let frame = 0, lastEvent = null, hideTimer = 0;
+    let frame = 0, lastEvent = null, lastPath = [], hideTimer = 0;
     document.addEventListener('pointermove', (e) => {
       lastEvent = e;
+      lastPath = e.composedPath(); // só existe durante o evento; no rAF já vem vazio
       if (!frame) frame = requestAnimationFrame(onHover);
     }, { capture: true, passive: true });
 
     function onHover() {
       frame = 0;
       const e = lastEvent;
-      if (e.composedPath().includes(host)) { clearTimeout(hideTimer); return; }
+      const path = lastPath;
+      if (path.includes(tile.el)) { clearTimeout(hideTimer); return; }
+      // Sobre o painel ou o botão: o controle do quadro não pode ficar por cima deles.
+      if (path.includes(host)) { clearTimeout(hideTimer); tile.hide(); return; }
       const t = findTile(e);
-      if (t && tile.showFor(t)) clearTimeout(hideTimer);
+      const avoid = [fab, panel].filter((el) => !el.hidden).map((el) => el.getBoundingClientRect());
+      if (t && tile.showFor(t, avoid)) clearTimeout(hideTimer);
       else { clearTimeout(hideTimer); hideTimer = setTimeout(tile.hide, 400); }
     }
   }
@@ -937,7 +962,8 @@
       sub.hidden = heard;
     }
 
-    function showFor(tileEl) {
+    // avoid: retângulos que o controle não pode cobrir (painel e botão da extensão).
+    function showFor(tileEl, avoid = []) {
       const n = tileName(tileEl.getAttribute('data-participant-id'));
       if (!n) return false;
       current = n;
@@ -951,15 +977,18 @@
       el.style.width = (inside ? Math.min(220, r.width - 16) : 220) + 'px';
       const w = el.offsetWidth, hgt = el.offsetHeight;
       const vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
-      let x, y;
-      if (inside) {
-        x = r.left + 8; y = r.top + 8;          // dentro do vídeo, canto superior esquerdo
-      } else {
-        x = r.left - w - 8 >= 4 ? r.left - w - 8 : r.right + 8; // item pequeno (lista de pessoas)
-        y = r.top + (r.height - hgt) / 2;
-      }
-      el.style.left = Math.min(Math.max(x, 4), vw - w - 4) + 'px';
-      el.style.top = Math.min(Math.max(y, 4), vh - hgt - 4) + 'px';
+      const clamp = ([x, y]) => [Math.min(Math.max(x, 4), vw - w - 4), Math.min(Math.max(y, 4), vh - hgt - 4)];
+
+      // Posições possíveis em ordem de preferência; fica na primeira livre.
+      const spots = inside
+        ? [[r.left + 8, r.top + 8], [r.right - w - 8, r.top + 8], [r.left + 8, r.bottom - hgt - 8], [r.right - w - 8, r.bottom - hgt - 8]]
+        : [[r.left - w - 8, r.top + (r.height - hgt) / 2], [r.right + 8, r.top + (r.height - hgt) / 2]]; // item pequeno (lista de pessoas)
+      const free = spots.map(clamp).find(([x, y]) =>
+        !avoid.some((a) => x < a.right && a.left < x + w && y < a.bottom && a.top < y + hgt));
+      if (!free) { el.hidden = true; return false; }
+
+      el.style.left = free[0] + 'px';
+      el.style.top = free[1] + 'px';
       return true;
     }
 

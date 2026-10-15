@@ -86,6 +86,8 @@ Para depurar, use o console da aba do Meet:
 __meetVolume.voices    // vozes detectadas
 __meetVolume.health()  // avisos atuais
 __meetVolume.stats     // estatísticas da identificação automática
+__meetVolume.tileName(document.querySelector('[data-participant-id]').dataset.participantId)
+                       // nome lido de um quadro
 ```
 
 Gerar ícones (requer Python com Pillow e o Chrome instalado):
