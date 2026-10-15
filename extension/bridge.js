@@ -8,7 +8,8 @@
   const TAG = 'meet-volume';
   const KEY = 'settings';
 
-  const toPage = (type, settings) => window.postMessage({ [TAG]: 'toPage', type, settings }, location.origin);
+  const version = chrome.runtime.getManifest().version;
+  const toPage = (type, settings) => window.postMessage({ [TAG]: 'toPage', type, settings, version }, location.origin);
 
   // A ordem de carga entre os dois scripts não é garantida: o inject.js pede "ready"
   // e a ponte também envia sozinha ao carregar. Receber "init" duas vezes é inofensivo.

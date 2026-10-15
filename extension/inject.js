@@ -29,6 +29,7 @@
   const LEGACY_KEYS = { store: 'meetVolume:v1', ui: 'meetVolume:ui' };
 
   const receiversByTrack = new Map(); // track.id -> RTCRtpReceiver
+  const peerConnections = new Set();  // usado só pelo diagnóstico
   const pipes = new Set();            // canais de áudio sendo processados
   const pending = new Set();          // elementos aguardando o AudioContext liberar
   const voices = new Map();           // voiceId -> { label, name, volume, muted, lastActive, level }
@@ -42,6 +43,10 @@
     const PCProxy = new Proxy(OrigPC, {
       construct(target, args, newTarget) {
         const pc = Reflect.construct(target, args, newTarget);
+        peerConnections.add(pc);
+        pc.addEventListener('connectionstatechange', () => {
+          if (pc.connectionState === 'closed') peerConnections.delete(pc);
+        });
         pc.addEventListener('track', (e) => {
           if (e.track && e.track.kind === 'audio') {
             receiversByTrack.set(e.track.id, e.receiver);
@@ -162,7 +167,12 @@
     dry.gain.value = store.normalize ? 0 : 1;
     wet.gain.value = store.normalize ? 1 : 0;
 
-    const pipe = { receiver, gain, dry, wet, source, keepAlive, output: dest.stream, currentVoice: null };
+    // Nível do som que chega no canal (antes do nosso volume), para o diagnóstico.
+    const analyser = c.createAnalyser();
+    analyser.fftSize = 512;
+    source.connect(analyser);
+
+    const pipe = { receiver, gain, dry, wet, source, analyser, keepAlive, output: dest.stream, currentVoice: null };
     pipes.add(pipe);
 
     const track = stream.getAudioTracks()[0];
@@ -183,6 +193,7 @@
   const storeListeners = new Set(); // a UI se inscreve para refletir mudanças vindas das opções
   const ownSaves = [];              // ecos dos nossos próprios saves, para ignorar
   let bridgeReady = false;
+  let extensionVersion = null;      // informado pela ponte (manifest.json)
 
   function saveStore() {
     if (!bridgeReady) return; // antes de carregar, salvar apagaria o que está guardado
@@ -220,6 +231,7 @@
   window.addEventListener('message', (e) => {
     if (e.source !== window || !e.data || e.data[BRIDGE] !== 'toPage') return;
     const { type, settings } = e.data;
+    if (e.data.version) extensionVersion = e.data.version;
     if (type === 'init') {
       if (bridgeReady) return; // a ponte pode mandar "init" duas vezes
       bridgeReady = true;
@@ -499,6 +511,113 @@
     v.dirty = true;
   }
 
+  // ---------------------------------------------------------------- diagnóstico
+  // Grava alguns segundos do que o Meet informa sobre cada canal de áudio, para
+  // entender o comportamento real dele numa chamada. Nomes e quadros viram apelidos
+  // (Pessoa1, Quadro1...) para o arquivo poder ser compartilhado.
+  async function record(seconds = 15, onProgress) {
+    const alias = (prefix) => {
+      const map = new Map();
+      return (key) => {
+        if (key == null || key === '') return null;
+        if (!map.has(key)) map.set(key, prefix + (map.size + 1));
+        return map.get(key);
+      };
+    };
+    const nameOf = alias('Pessoa');
+    const tileOf = alias('Quadro');
+    const channelOf = alias('Canal');
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const round = (x, d = 3) => (x == null ? null : +x.toFixed(d));
+    const buf = new Float32Array(512);
+    const rms = (an) => {
+      an.getFloatTimeDomainData(buf);
+      let s = 0;
+      for (const x of buf) s += x * x;
+      return round(Math.sqrt(s / buf.length), 4);
+    };
+    const tsBase = {}; // timestamps relativos ao primeiro visto, separados por tipo (CSRC/SSRC)
+    const ts = (prefix, t) => { tsBase[prefix] ??= t; return Math.round(t - tsBase[prefix]); };
+    const sources = (list, prefix) => list.map((s) => ({
+      id: prefix + s.source, level: round(s.audioLevel), ts: ts(prefix, s.timestamp), rtp: s.rtpTimestamp ?? null,
+    }));
+
+    const meta = {
+      extensionVersion,
+      userAgent: navigator.userAgent,
+      startedAt: new Date().toISOString(),
+      peerConnections: peerConnections.size,
+      audioReceivers: receiversByTrack.size,
+      channels: pipes.size,
+      audioElements: document.querySelectorAll('audio').length,
+      audioContext: ctx ? ctx.state : null,
+      settings: { master, normalize: store.normalize, autoName: store.autoName },
+      headerExtensions: [...pipes].map((p) => {
+        try { return { channel: channelOf(p), uris: p.receiver.getParameters().headerExtensions.map((e) => e.uri) }; }
+        catch { return { channel: channelOf(p), uris: null }; }
+      }),
+    };
+
+    const samples = [];
+    const t0 = performance.now();
+    while (performance.now() - t0 < seconds * 1000) {
+      const now = performance.now();
+      const channels = [];
+      for (const p of pipes) {
+        let inbound = null;
+        try {
+          for (const r of (await p.receiver.getStats()).values()) {
+            if (r.type === 'inbound-rtp') inbound = { ssrc: r.ssrc, level: round(r.audioLevel), packets: r.packetsReceived, energy: round(r.totalAudioEnergy, 5) };
+          }
+        } catch {}
+        channels.push({
+          ch: channelOf(p),
+          chosen: p.currentVoice,
+          gain: round(p.gain.gain.value),
+          rms: rms(p.analyser),
+          csrcs: sources(p.receiver.getContributingSources?.() || [], 'c'),
+          ssrcs: sources(p.receiver.getSynchronizationSources?.() || [], 's'),
+          inbound,
+        });
+      }
+      const tiles = [];
+      const seen = new Set();
+      for (const el of document.querySelectorAll('[data-participant-id]')) {
+        const pid = el.getAttribute('data-participant-id');
+        if (seen.has(pid)) continue;
+        seen.add(pid);
+        const changed = tileLastChange.get(pid);
+        tiles.push({ tile: tileOf(pid), name: nameOf(tileName(pid)), changedMsAgo: changed ? Math.round(now - changed) : null });
+      }
+      const vs = [...voices.values()].map((v) => ({
+        id: v.id, name: nameOf(v.name.trim()) || v.label, source: v.nameSource || null, tile: tileOf(v.pid),
+        volume: v.volume, muted: v.muted, activeMsAgo: v.lastActive ? Math.round(now - v.lastActive) : null,
+      }));
+      samples.push({ t: Math.round(now - t0), channels, tiles, voices: vs });
+      if (onProgress) onProgress(Math.ceil(seconds - (performance.now() - t0) / 1000));
+      await wait(100);
+    }
+
+    const learning = [...stats].map(([id, s]) => ({
+      voice: id, n: round(s.n, 1), total: s.total,
+      hits: Object.fromEntries([...s.hits].map(([pid, c]) => [tileOf(pid), round(c / s.n)])),
+    }));
+    const base = { n: round(baseline.n, 1), hits: Object.fromEntries([...baseline.hits].map(([pid, c]) => [tileOf(pid), round(c / (baseline.n || 1))])) };
+    return { meta, learning, baseline: base, samples };
+  }
+
+  async function downloadDiagnostic(onProgress) {
+    const data = await record(15, onProgress);
+    const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `meet-volume-diagnostico-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.json`;
+    document.documentElement.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  }
+
   // ---------------------------------------------------------------- avisos
   // Detecta quando o Meet mudou algo por dentro e a extensão deixou de funcionar.
   let remoteSince = 0;      // primeira vez que vimos áudio remoto (RTCPeerConnection)
@@ -553,6 +672,7 @@
     baseline,
     health,
     tileName,
+    record,
     // Estado de cada canal de áudio: quem a extensão acha que está nele e o que o Meet informa.
     channels: () => [...pipes].map((p) => ({
       voice: p.currentVoice,
@@ -675,6 +795,8 @@
     .switch input:focus-visible + .track { outline: 2px solid #8ab4f8; outline-offset: 2px; }
     .switch .desc { color: #9aa0a6; font-size: 11px; margin-top: 2px; }
     .more { background: none; border: none; color: #8ab4f8; cursor: pointer; font-size: 12px; padding: 8px 0 0; }
+    .diag { display: block; color: #9aa0a6; margin-top: 4px; }
+    .diag:disabled { cursor: default; color: #fdd663; }
     .tile {
       position: fixed; z-index: 2147483647; width: 220px; padding: 8px 10px;
       background: rgba(32,33,36,.92); color: #e8eaed; border-radius: 10px;
@@ -760,6 +882,23 @@
       !!store.normalize, setNormalize);
     let showAll = false;
     const more = h('button', { className: 'more', onclick: () => { showAll = !showAll; render(); } });
+    const DIAG_LABEL = 'Gravar diagnóstico (15 s)';
+    const diag = h('button', {
+      className: 'more diag', textContent: DIAG_LABEL,
+      title: 'Grava como o Meet está mandando o áudio e baixa um arquivo para enviar ao desenvolvedor. Os nomes são trocados por apelidos.',
+      onclick: async () => {
+        if (diag.disabled) return;
+        diag.disabled = true;
+        try {
+          await downloadDiagnostic((s) => { diag.textContent = `Gravando… ${s} s (peça para cada pessoa falar)`; });
+          diag.textContent = 'Arquivo baixado ✓';
+        } catch (err) {
+          console.warn(LOG, 'falha no diagnóstico', err);
+          diag.textContent = 'Falhou — veja o console';
+        }
+        setTimeout(() => { diag.textContent = DIAG_LABEL; diag.disabled = false; }, 3000);
+      },
+    });
     const panel = h('div', { className: 'panel', hidden: true },
       header,
       h('p', { className: 'hint', textContent: 'Nomes são detectados sozinhos e os volumes ficam salvos por nome. Passe o mouse sobre o vídeo de alguém para ajustar direto.' }),
@@ -772,6 +911,7 @@
       empty,
       list,
       more,
+      diag,
       datalist,
     );
     const fab = h('button', { className: 'fab', title: 'Volume individual (arraste para mover)' }, icon('volumeUp', 22));
