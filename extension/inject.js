@@ -1230,6 +1230,7 @@
   const isVisible = (r) => r.width > 0 && r.height > 0;
   const rgb = (c) => (c.match(/\d+(\.\d+)?/g) || []).map(Number);
   const BAR_ATTR = 'data-meet-volume-bar';
+  const FRAME_ATTR = 'data-meet-volume-frame';
 
   function looksRed(el) {
     for (const e of [el, ...el.querySelectorAll('*')].slice(0, 6)) {
@@ -1381,13 +1382,21 @@
     const rule = document.createElement('style');
     rule.id = 'meet-volume-bar-style';
 
-    let bar = null, w = 48, frame = 0;
+    let bar = null, frameEl = null, w = 48, frame = 0;
+    let padCss = '', frameCss = '';
 
     function release() {
       if (bar) bar.removeAttribute(BAR_ATTR);
-      bar = null;
+      if (frameEl) frameEl.removeAttribute(FRAME_ATTR);
+      bar = frameEl = null;
+      padCss = frameCss = '';
       rule.textContent = '';
       host.classList.remove('on');
+    }
+
+    function writeRule() {
+      const text = padCss + frameCss;
+      if (rule.textContent !== text) rule.textContent = text;
     }
 
     // Reposiciona o botão sobre o recuo a cada quadro (a barra anima e muda de lugar).
@@ -1440,8 +1449,27 @@
           // Recuo = recuo original + nosso botão + o espaço entre grupos.
           const pad = parseFloat(getComputedStyle(bar).paddingLeft) || 0;
           bar.setAttribute(BAR_ATTR, '');
-          rule.textContent = `[${BAR_ATTR}] { padding-left: ${Math.round(pad + w + (lay ? lay.gap : 8))}px !important; }`;
+          padCss = `[${BAR_ATTR}] { padding-left: ${Math.round(pad + w + (lay ? lay.gap : 8))}px !important; }`;
         }
+        // Com os seletores de microfone/câmera abertos, o Meet dimensiona a moldura
+        // pela largura do seletor (medido: 620 px), não pela linha de botões (676 px
+        // com o nosso recuo), e a linha vaza para fora dela. Largura mínima = linha.
+        const f = barFrame(bar);
+        if (f !== frameEl) {
+          if (frameEl) frameEl.removeAttribute(FRAME_ATTR);
+          frameEl = f && f !== bar ? f : null;
+          frameCss = '';
+        }
+        if (frameEl) {
+          if (!frameEl.hasAttribute(FRAME_ATTR)) frameEl.setAttribute(FRAME_ATTR, '');
+          const cs = getComputedStyle(frameEl);
+          const extra = cs.boxSizing === 'border-box'
+            ? parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) + parseFloat(cs.borderLeftWidth) + parseFloat(cs.borderRightWidth)
+            : 0;
+          const min = Math.ceil(bar.getBoundingClientRect().width + extra);
+          frameCss = ` [${FRAME_ATTR}] { min-width: ${min}px !important; }`;
+        }
+        writeRule();
         if (!rule.isConnected) (document.head || document.documentElement).append(rule);
         host.classList.add('on');
         dock.docked = true;
