@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Captura da loja</title>
+<!--
+  Réplica do Google Meet com pessoas fictícias, rodando a extensão de verdade
+  (../../extension/inject.js). Cada cena (?scene=...) arma um estado e vira uma
+  captura 1280x800 via scripts/build-store-images.py.
+-->
+<link rel="stylesheet" href="frame.css">
+<style>
+  .meet { position: absolute; inset: 0; background: #202124; }
+  .top { position: absolute; left: 24px; top: 18px; font-size: 15px; color: #e8eaed; }
+  .top span { color: #9aa0a6; margin: 0 8px; }
+  .grid {
+    position: absolute; left: 16px; right: 16px; top: 52px; bottom: 96px;
+    display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 10px;
+  }
+  .tile { position: relative; border-radius: 14px; overflow: hidden; }
+  .tile.speaking { box-shadow: inset 0 0 0 3px #8ab4f8; }
+  .avatar {
+    position: absolute; left: 50%; top: 46%; width: 92px; height: 92px; margin: -46px 0 0 -46px;
+    border-radius: 50%; display: grid; place-items: center; color: #fff;
+    font-size: 40px; font-weight: 500;
+  }
+  /* Inicial via ::before para não virar texto do quadro (a extensão lê o nome do texto). */
+  .avatar::before { content: attr(data-initial); }
+  .tile.speaking .avatar { box-shadow: 0 0 0 6px rgba(138, 180, 248, .35); }
+  .name { position: absolute; left: 16px; bottom: 12px; font-size: 15px; font-weight: 500; }
+  .mic { position: absolute; right: 12px; top: 12px; width: 28px; height: 28px; border-radius: 50%;
+    display: grid; place-items: center; background: rgba(32, 33, 36, .6); }
+  .bar-wrap { position: absolute; left: 0; right: 0; bottom: 14px; display: flex; justify-content: center; }
+  .frame { background: #1e1f20; border-radius: 24px; display: flex; }
+  .bar { display: grid; grid-auto-flow: column; gap: 12px; padding: 12px; align-items: center; }
+  .bar button { border: none; padding: 0; cursor: pointer; display: grid; place-items: center; color: #e3e3e3; }
+  .grp { display: flex; border-radius: 24px; background: #333537; }
+  .grp .chev { width: 40px; height: 48px; background: transparent; }
+  .grp .tog { width: 48px; height: 48px; border-radius: 50%; background: #333537; }
+  .pill { width: 56px; height: 48px; border-radius: 24px; background: transparent; position: relative; }
+  .pill i { position: absolute; inset: 0; border-radius: 24px; background: #333537; display: grid; place-items: center; }
+  .more { width: 36px; height: 48px; border-radius: 18px; background: #333537; }
+  .leave { width: 72px; height: 48px; border-radius: 24px; background: #dc362e; color: #fff; }
+  .side { position: absolute; right: 24px; bottom: 30px; display: flex; gap: 20px; color: #e3e3e3; }
+  /* Quadro da cena "igualar volumes": diferença medida entre a voz mais alta e a mais baixa. */
+  .compare {
+    position: absolute; right: 40px; top: 70px; width: 470px; padding: 22px 26px;
+    background: rgba(32, 33, 36, .96); border-radius: 16px; box-shadow: 0 12px 32px rgba(0, 0, 0, .5);
+  }
+  .compare h2 { margin: 0 0 4px; font-size: 18px; font-weight: 500; }
+  .compare .sub { margin: 0 0 18px; font-size: 13px; color: #9aa0a6; }
+  .row { margin-bottom: 16px; }
+  .row:last-child { margin-bottom: 0; }
+  .row .label { display: flex; justify-content: space-between; font-size: 14px; margin-bottom: 8px; }
+  .row .label b { font-size: 18px; }
+  .bars { display: grid; grid-template-columns: 72px 1fr; gap: 6px 10px; align-items: center; font-size: 12px; color: #9aa0a6; }
+  .bars span.b { height: 10px; border-radius: 5px; }
+  .off .b { background: #5f6368; }
+  .on .b { background: #8ab4f8; }
+  .on .label b { color: #8ab4f8; }
+</style>
+<script>window.requestAnimationFrame = (cb) => setTimeout(cb, 16);</script>
+<script src="../../extension/inject.js"></script>
+<script>
+  // Configurações salvas antes de a interface montar.
+  const scene = new URLSearchParams(location.search).get('scene') || 'hero';
+  const store = window.__meetVolume.store;
+  store.normalize = scene === 'normalize';
+  store.people = {
+    'ana souza': { name: 'Ana Souza', volume: 1, muted: false },
+    'bruno lima': { name: 'Bruno Lima', volume: scene === 'hover' ? 0.6 : 2, muted: false },
+    'carla mendes': { name: 'Carla Mendes', volume: 0.4, muted: false },
+    'diego rocha': { name: 'Diego Rocha', volume: 1, muted: true },
+  };
+</script>
+</head>
+<body>
+  <div class="head" id="head"></div>
+  <div class="window">
+    <div class="meet">
+      <div class="top">10:30<span>|</span>Reunião de equipe</div>
+      <div class="grid" id="grid"></div>
+      <div class="side" id="side"></div>
+      <div class="bar-wrap"><div class="frame"><div class="bar" id="bar"></div></div></div>
+    </div>
+  </div>
+<script>
+  const I = {
+    mic: 'M12 14c1.66 0 2.99-1.34 2.99-3L15 5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z',
+    cam: 'M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z',
+    up: 'M7.41 15.41L12 10.83l4.59 4.58L18 14l-6-6-6 6z',
+    present: 'M21 3H3c-1.11 0-2 .89-2 2v14c0 1.11.89 2 2 2h18c1.11 0 2-.89 2-2V5c0-1.11-.89-2-2-2zm0 16.02H3V4.98h18v14.04zM10 12H8l4-4 4 4h-2v4h-4v-4z',
+    mood: 'M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm3.5-9c.83 0 1.5-.67 1.5-1.5S16.33 8 15.5 8 14 8.67 14 9.5s.67 1.5 1.5 1.5zm-7 0c.83 0 1.5-.67 1.5-1.5S9.33 8 8.5 8 7 8.67 7 9.5 7.67 11 8.5 11zm3.5 6.5c2.33 0 4.31-1.46 5.11-3.5H6.89c.8 2.04 2.78 3.5 5.11 3.5z',
+    cc: 'M19 4H5c-1.11 0-2 .9-2 2v12c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm-8 7H9.5v-.5h-2v3h2V13H11v1c0 .55-.45 1-1 1H7c-.55 0-1-.45-1-1v-4c0-.55.45-1 1-1h3c.55 0 1 .45 1 1v1zm7 0h-1.5v-.5h-2v3h2V13H18v1c0 .55-.45 1-1 1h-3c-.55 0-1-.45-1-1v-4c0-.55.45-1 1-1h3c.55 0 1 .45 1 1v1z',
+    hand: 'M23 5.5V20c0 2.2-1.8 4-4 4h-7.3c-1.08 0-2.1-.43-2.85-1.19L1 14.83s1.26-1.23 1.3-1.25c.22-.19.49-.29.79-.29.22 0 .42.06.6.16.04.01 4.31 2.46 4.31 2.46V4c0-.83.67-1.5 1.5-1.5S11 3.17 11 4v7h1V1.5c0-.83.67-1.5 1.5-1.5S15 .67 15 1.5V11h1V2.5c0-.83.67-1.5 1.5-1.5s1.5.67 1.5 1.5V11h1V5.5c0-.83.67-1.5 1.5-1.5s1.5.67 1.5 1.5z',
+    more: 'M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z',
+    end: 'M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08c-.18-.17-.29-.42-.29-.7 0-.28.11-.53.29-.71C3.34 8.78 7.46 7 12 7s8.66 1.78 11.71 4.67c.18.18.29.43.29.71 0 .28-.11.53-.29.71l-2.48 2.48c-.18.18-.43.29-.71.29-.27 0-.52-.11-.7-.28-.79-.74-1.69-1.36-2.67-1.85-.33-.16-.56-.5-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z',
+    micOff: 'M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5c0-1.66-1.34-3-3-3S9 3.34 9 5v.18l5.98 5.99zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z',
+    chat: 'M20 2H4c-1.1 0-1.99.9-1.99 2L2 22l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 9h12v2H6V9zm8 5H6v-2h8v2zm4-6H6V6h12v2z',
+    people: 'M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z',
+  };
+  const svg = (d, size = 24, color = 'currentColor') =>
+    `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="${color}"><path d="${d}"/></svg>`;
+
+  // Pessoas fictícias.
+  const people = [
+    { id: 'p1', name: 'Ana Souza', bg: '#3b4a6b', av: '#5e7ce2' },
+    { id: 'p2', name: 'Bruno Lima', bg: '#2f4a3a', av: '#34a853' },
+    { id: 'p3', name: 'Carla Mendes', bg: '#5a3a2a', av: '#e8710a' },
+    { id: 'p4', name: 'Diego Rocha', bg: '#46345c', av: '#a142f4' },
+  ];
+  const grid = document.getElementById('grid');
+  grid.innerHTML = people.map((p) => `
+    <div class="tile${p.id === 'p1' ? ' speaking' : ''}" data-participant-id="${p.id}"
+         style="background:radial-gradient(circle at 50% 40%, ${p.bg} 0%, #202124 120%)">
+      <div class="avatar" data-initial="${p.name[0]}" style="background:${p.av}"></div>
+      <div class="name">${p.name}</div>
+      <div class="mic">${svg(I.micOff, 16, '#e3e3e3')}</div>
+    </div>`).join('');
+
+  document.getElementById('bar').innerHTML = `
+    <div class="grp"><button class="chev">${svg(I.up, 20)}</button><button class="tog">${svg(I.mic)}</button></div>
+    <div class="grp"><button class="chev">${svg(I.up, 20)}</button><button class="tog">${svg(I.cam)}</button></div>
+    <div><button class="pill"><i>${svg(I.present)}</i></button></div>
+    <div><button class="pill"><i>${svg(I.mood)}</i></button></div>
+    <div><button class="pill"><i>${svg(I.cc)}</i></button></div>
+    <div><button class="pill"><i>${svg(I.hand)}</i></button></div>
+    <div><button class="more">${svg(I.more)}</button></div>
+    <div><button class="leave">${svg(I.end)}</button></div>`;
+  document.getElementById('side').innerHTML = svg(I.people, 24, '#e3e3e3') + svg(I.chat, 24, '#e3e3e3');
+
+  const titles = {
+    hero: ['Volume <span class="y">individual</span> no Google Meet', 'Ajuste o volume de cada pessoa da chamada — de 0% a 200% — como no Discord.'],
+    hover: ['Ajuste <span class="y">direto no vídeo</span>', 'Passe o mouse sobre alguém e mova o controle. O volume fica salvo para as próximas chamadas.'],
+    normalize: ['<span class="y">Igualar volumes</span> com um clique', 'Aproxima quem fala alto de quem fala baixo e evita som estourado.'],
+  };
+  document.getElementById('head').innerHTML = `<h1>${titles[scene][0]}</h1><p>${titles[scene][1]}</p>`;
+
+  if (scene === 'normalize') {
+    // Medido na extensão com um tom de teste: voz alta 0,30 x baixa 0,03 (10x);
+    // com "igualar volumes": 0,43 x 0,12 (3,7x).
+    const bars = (loud, quiet) =>
+      `<div class="bars"><span>Fala alto</span><span class="b" style="width:${loud}%"></span>
+       <span>Fala baixo</span><span class="b" style="width:${quiet}%"></span></div>`;
+    const card = document.createElement('div');
+    card.className = 'compare';
+    card.innerHTML = `
+      <h2>Diferença entre quem fala alto e baixo</h2>
+      <p class="sub">Medida na extensão</p>
+      <div class="row off"><div class="label">Desligado <b>10×</b></div>${bars(70, 7)}</div>
+      <div class="row on"><div class="label">Igualar volumes <b>3,7×</b></div>${bars(100, 27)}</div>`;
+    document.querySelector('.meet').append(card);
+  }
+
+  // Vozes como se a extensão já tivesse identificado cada pessoa.
+  addEventListener('DOMContentLoaded', () => {
+    const now = performance.now();
+    const voices = window.__meetVolume.voices;
+    people.forEach((p, i) => {
+      const saved = store.people[p.name.toLowerCase()];
+      voices.set('c' + (1000 + i), {
+        id: 'c' + (1000 + i), label: `Voz ${i + 1}`, name: p.name, nameSource: 'auto', pid: p.id,
+        volume: saved.volume, muted: saved.muted, touched: false, lastActive: now - i * 1000, level: 0, dirty: true,
+      });
+    });
+    // Ana está falando: mantém a bolinha verde acesa.
+    setInterval(() => { voices.get('c1000').lastActive = performance.now(); }, 100);
+
+    setTimeout(() => {
+      const dockBtn = document.getElementById('meet-volume-dock')?.shadowRoot.querySelector('button');
+      if (scene === 'hover') {
+        const tile = document.querySelector('[data-participant-id="p2"]');
+        const r = tile.getBoundingClientRect();
+        tile.querySelector('.name').dispatchEvent(new PointerEvent('pointermove', {
+          bubbles: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2,
+        }));
+      } else if (dockBtn) {
+        dockBtn.click();
+      }
+    }, 1500);
+  });
+</script>
+</body>
+</html>

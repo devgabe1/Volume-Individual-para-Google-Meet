@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Captura da loja: opções</title>
+<!-- A página de opções real (../../extension/options.html) com um chrome.storage
+     simulado e pessoas fictícias, dentro da moldura das capturas. -->
+<link rel="stylesheet" href="frame.css">
+<style>
+  iframe { width: 100%; height: 100%; border: none; display: block; background: #202124; }
+</style>
+</head>
+<body>
+  <div class="head">
+    <h1>Tudo salvo, <span class="y">tudo sob seu controle</span></h1>
+    <p>Revise e apague os volumes salvos. Nada sai do seu navegador.</p>
+  </div>
+  <div class="window"><iframe id="opts"></iframe></div>
+<script>
+  const settings = {
+    master: 1, normalize: true, autoName: true, dock: true, ui: null,
+    people: {
+      'ana souza': { name: 'Ana Souza', volume: 1, muted: false },
+      'bruno lima': { name: 'Bruno Lima', volume: 2, muted: false },
+      'carla mendes': { name: 'Carla Mendes', volume: 0.4, muted: false },
+      'diego rocha': { name: 'Diego Rocha', volume: 1, muted: true },
+      'elisa prado': { name: 'Elisa Prado', volume: 0.75, muted: false },
+    },
+  };
+  const mock = `<script>window.chrome = {
+    runtime: { getManifest: () => ({ version: '1.0.1' }) },
+    storage: { local: { get: async () => ({ settings: ${JSON.stringify(settings)} }), set: async () => {} },
+               onChanged: { addListener() {} } } };<\/script>`;
+  fetch('../../extension/options.html').then((r) => r.text()).then((html) => {
+    html = html
+      // Tema escuro (o mesmo do options.css), independente do tema do sistema.
+      .replace('<head>', `<head><base href="../../extension/"><style>:root{color-scheme:dark;
+        --bg:#202124;--card:#292a2d;--text:#e8eaed;--muted:#9aa0a6;--line:#3c4043;--accent:#8ab4f8;
+        --accent-on:#202124;--track:#5f6368;--danger:#f28b82;--hover:rgba(232,234,237,.08)}</style>`)
+      .replace('<script src="options.js">', mock + '<script src="options.js">');
+    const frame = document.getElementById('opts');
+    // Rola até a lista de pessoas salvas, que é o assunto desta captura.
+    frame.addEventListener('load', () => setTimeout(() => {
+      const doc = frame.contentDocument;
+      const target = doc.querySelector('.section-head');
+      if (target) frame.contentWindow.scrollTo(0, target.getBoundingClientRect().top + frame.contentWindow.scrollY - 330);
+    }, 300));
+    frame.srcdoc = html;
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+/* Moldura das capturas da Chrome Web Store (1280x800): título em cima, "janela" embaixo. */
+html, body { margin: 0; width: 1280px; height: 800px; overflow: hidden; }
+body {
+  background: radial-gradient(120% 90% at 0% 0%, #2d2f33 0%, #18191b 70%);
+  font-family: 'Google Sans', 'Segoe UI', Roboto, Arial, sans-serif;
+  color: #e8eaed;
+}
+.head { position: absolute; left: 64px; right: 64px; top: 40px; height: 110px; }
+.head h1 { margin: 0 0 10px; font-size: 40px; line-height: 1.15; font-weight: 600; }
+.head h1 .y { color: #fbbc04; }
+.head p { margin: 0; font-size: 20px; color: #bdc1c6; }
+.window {
+  position: absolute; left: 50px; top: 172px; width: 1180px; height: 600px;
+  border-radius: 16px; overflow: hidden; background: #202124;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .55), 0 0 0 1px rgba(255, 255, 255, .06);
+}

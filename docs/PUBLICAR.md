@@ -27,9 +27,11 @@
 | Item | Tamanho | Obrigatório |
 |---|---|---|
 | Ícone | 128×128 (já em `extension/icons/icon128.png`) | Sim |
-| Capturas de tela | 1280×800 ou 640×400, de 1 a 5 | Sim (pelo menos 1) |
-| Bloco promocional pequeno | 440×280 (já em `store/promo-440x280.png`; gere de novo com `python scripts/build-store-images.py`) | Sim |
+| Capturas de tela | 1280×800 (já em `store/screenshot-*.png`: réplica do Meet com pessoas fictícias rodando a extensão de verdade) | Sim (pelo menos 1) |
+| Bloco promocional pequeno | 440×280 (já em `store/promo-440x280.png`) | Sim |
 | Bloco promocional de letreiro (marquee) | 1400×560 (já em `store/promo-1400x560.png`) | Não |
+
+Todas as imagens de `store/` são geradas por `python scripts/build-store-images.py` (requer Python com Pillow e o Chrome).
 
 Sugestões de capturas:
 1. Painel aberto durante uma chamada, com várias pessoas e volumes diferentes.
