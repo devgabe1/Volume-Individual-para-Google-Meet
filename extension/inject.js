@@ -804,6 +804,10 @@
     .fab:hover { background: #5f6368; }
     .fab.dragging { cursor: grabbing; }
     .behind { visibility: hidden !important; }
+    .fab.dim { pointer-events: none; }
+    .fab.dim::before {
+      content: ''; position: absolute; inset: 0; z-index: 1; border-radius: 50%; background: var(--scrim);
+    }
     .fab.alert::after {
       content: ''; position: absolute; top: 2px; right: 2px; width: 10px; height: 10px;
       border-radius: 50%; background: #ea4335; border: 2px solid #3c4043;
@@ -1173,6 +1177,37 @@
         const mine = [fab, panel].filter((el) => !el.hidden).map((el) => el.getBoundingClientRect());
         if (mine.some((m) => overlaps(r, m))) tile.el.classList.add('behind');
       }
+
+      // Diálogos modais do Meet (ex.: "Encerrar a chamada ou apenas sair?") escurecem
+      // a página com uma camada cinza. Nossa UI fica acima dela: escurecemos os botões
+      // com a mesma cor, bloqueamos o clique e escondemos painel e cartão.
+      const scrim = findScrim();
+      fab.classList.toggle('dim', !!scrim);
+      if (scrim) fab.style.setProperty('--scrim', scrim);
+      dock.setDim(scrim);
+      if (scrim) {
+        tile.el.classList.add('behind');
+        panel.classList.add('behind');
+      }
+    }
+
+    // Camada que escurece a página: sob os cantos superiores da tela, o primeiro
+    // elemento com fundo visível (ignorando os nossos e os transparentes). É camada se
+    // cobrir a tela toda com cor semitransparente; se for opaco, não há camada.
+    function findScrim() {
+      const vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
+      for (const [x, y] of [[4, 4], [vw - 4, 4]]) {
+        for (const el of document.elementsFromPoint(x, y)) {
+          if (el === host || el === dock.host) continue;
+          const bg = getComputedStyle(el).backgroundColor;
+          const [, , , a = 1] = rgb(bg);
+          if (a < 0.08) continue; // transparente: olha o de baixo
+          const r = el.getBoundingClientRect();
+          if (a <= 0.9 && r.width >= vw * 0.95 && r.height >= vh * 0.95) return bg;
+          break; // primeiro fundo visível não é camada: neste canto não há
+        }
+      }
+      return null;
     }
     setInterval(yieldToMeetPopups, 150);
 
@@ -1397,6 +1432,11 @@
         content: ''; position: absolute; top: 4px; right: 4px; width: 9px; height: 9px;
         border-radius: 50%; background: #ea4335; border: 2px solid var(--bg, #3c4043);
       }
+      /* Diálogo modal do Meet aberto: mesma camada escura por cima, sem clique. */
+      :host(.dim) { pointer-events: none; }
+      :host(.dim) button::before {
+        content: ''; position: absolute; inset: 0; z-index: 1; border-radius: inherit; background: var(--scrim);
+      }
     ` }));
     const btn = h('button', { title: 'Volume individual', ariaLabel: 'Volume individual', onclick: onClick }, icon('volumeUp', 24));
     root.append(btn);
@@ -1449,6 +1489,10 @@
       rect: () => btn.getBoundingClientRect(),
       setActive: (on) => btn.classList.toggle('active', on),
       setAlert: (on) => btn.classList.toggle('alert', on),
+      setDim(color) {
+        host.classList.toggle('dim', !!color);
+        if (color) host.style.setProperty('--scrim', color);
+      },
       // Encaixa (ou mantém encaixado) na barra. Devolve true se o estado mudou.
       sync() {
         const was = dock.docked;
