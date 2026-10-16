@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacidade · Volume Individual para Google Meet</title>
+<meta name="description" content="Política de privacidade da extensão Volume Individual para Google Meet: nenhum dado sai do seu navegador.">
+<link rel="icon" href="img/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<!-- Mesmo conteúdo de PRIVACY.md (raiz do repositório): mantenha os dois iguais. -->
+<header class="wrap nav">
+  <a class="brand" href="./"><img src="img/icon.svg" alt="">Volume Individual</a>
+  <nav><a class="link" href="./">Início</a></nav>
+</header>
+
+<main class="doc">
+  <h1>Política de privacidade</h1>
+  <p><em>Última atualização: 16 de outubro de 2026</em></p>
+
+  <p>A extensão <strong>Volume Individual para Google Meet</strong> não coleta, transmite, vende ou compartilha dados pessoais.</p>
+
+  <h2>O que é processado</h2>
+  <ul>
+    <li><strong>Áudio da chamada</strong>: é processado localmente, em tempo real, só para ajustar o volume. Nada é gravado nem enviado para lugar nenhum.</li>
+    <li><strong>Nomes dos participantes</strong>: são lidos da tela do Meet para identificar quem está falando.</li>
+  </ul>
+
+  <h2>O que é armazenado</h2>
+  <p>Ficam salvos no <code>chrome.storage.local</code>, apenas no seu navegador:</p>
+  <ul>
+    <li>o volume e o estado de silenciado de cada pessoa, associados ao nome dela;</li>
+    <li>as preferências da extensão (volume geral, "igualar volumes", nomes automáticos, botão na barra do Meet);</li>
+    <li>a posição do botão flutuante.</li>
+  </ul>
+  <p>Esses dados nunca saem do seu computador. Você pode apagá-los a qualquer momento na página de opções da extensão ou removendo a extensão.</p>
+
+  <h2>Diagnóstico (opcional)</h2>
+  <p>O painel tem um botão <strong>"Gravar diagnóstico"</strong>. Ele só funciona quando você clica nele: grava por 15 segundos dados técnicos da chamada (níveis de áudio, como o Meet organiza os canais de som e a barra de controles) e <strong>baixa um arquivo no seu computador</strong>. Os nomes dos participantes são trocados por apelidos (Pessoa1, Pessoa2...). O arquivo não é enviado a lugar nenhum — ele só chega a alguém se você mesmo decidir compartilhá-lo, por exemplo para relatar um problema.</p>
+
+  <h2>Permissões</h2>
+  <table>
+    <tr><th>Permissão</th><th>Por quê</th></tr>
+    <tr><td><code>storage</code></td><td>Guardar volumes e preferências no seu navegador.</td></tr>
+    <tr><td>Acesso a <code>meet.google.com</code></td><td>Ajustar o áudio e mostrar o painel nas chamadas do Meet.</td></tr>
+  </table>
+
+  <h2>Terceiros</h2>
+  <p>A extensão não usa servidores próprios, analytics, anúncios nem bibliotecas de terceiros.</p>
+
+  <h2>Contato</h2>
+  <p>Dúvidas: abra uma <a href="https://github.com/devgabe1/Volume-Individual-para-Google-Meet/issues">issue no GitHub</a>.</p>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p><a href="./">Início</a> · <a href="https://github.com/devgabe1/Volume-Individual-para-Google-Meet">GitHub</a></p>
+    <p>Esta extensão não é afiliada ao Google. Google Meet e Chrome são marcas do Google LLC.</p>
+  </div>
+</footer>
+</body>
+</html>

@@ -5,6 +5,7 @@
 Saída em store/:
   promo-440x280.png, promo-1400x560.png    blocos promocionais
   screenshot-1-visao-geral.png ...         capturas 1280x800
+E em docs/img/ as imagens da página do GitHub Pages.
 
 As capturas rodam a extensão de verdade (extension/inject.js e options.html)
 numa réplica do Meet com pessoas fictícias (assets/screenshots/). Um servidor
@@ -79,6 +80,25 @@ def main():
             render(base + path, OUT / name, 1280, 800, wait_ms=4000)
     finally:
         server.shutdown()
+
+    build_site_images()
+
+
+# Imagens da página do GitHub Pages (docs/): só a "janela" das capturas (sem o
+# título, que a página tem em HTML), em WebP; o ícone e a imagem de compartilhamento.
+WINDOW_BOX = (50, 172, 1230, 772)  # .window em assets/screenshots/frame.css
+
+
+def build_site_images():
+    site = ROOT / "docs" / "img"
+    site.mkdir(parents=True, exist_ok=True)
+    for name, _ in SCREENSHOTS:
+        out = site / (Path(name).stem.replace("screenshot-", "") + ".webp")
+        Image.open(OUT / name).crop(WINDOW_BOX).save(out, "WEBP", quality=88, method=6)
+        print(out.relative_to(ROOT))
+    (site / "icon.svg").write_bytes((ROOT / "assets" / "icon.svg").read_bytes())
+    Image.open(OUT / "promo-1400x560.png").convert("RGB").resize((1200, 480)).save(site / "og.png", optimize=True)
+    print((site / "og.png").relative_to(ROOT))
 
 
 if __name__ == "__main__":

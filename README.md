@@ -26,7 +26,7 @@
 
 ### Chrome Web Store
 
-[**Instalar pela Chrome Web Store**](https://chromewebstore.google.com/detail/hgbphnmcegggkpllbhhjmcgdbjoidpoe)
+[**Instalar pela Chrome Web Store**](https://chromewebstore.google.com/detail/hgbphnmcegggkpllbhhjmcgdbjoidpoe) · [Página do projeto](https://devgabe1.github.io/Volume-Individual-para-Google-Meet/)
 
 ### Modo desenvolvedor
 
