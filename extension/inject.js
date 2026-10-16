@@ -1282,12 +1282,14 @@
     // se for escura e neutra (cinza). Botões em estado especial (microfone/câmera
     // desligados ficam rosa) nunca servem de cor. A cor pode estar num elemento
     // interno ou num ::before, não no <button>.
-    // Formato e cor vêm dos MESMOS botões (os cinza): o do microfone muda de formato
-    // ao desligar (vira quadrado arredondado), então não serve de referência.
+    // Formato e cor vêm dos botões cinza "comuns" (apresentar, emoji, legendas, mão):
+    // no Meet eles são pílulas de 56×48 que nunca mudam. Os de microfone/câmera
+    // (48×48) mudam de formato a cada clique (círculo ↔ quadrado arredondado), e
+    // ganhariam a contagem se só aceitássemos botões quadrados.
     const styles = new Map();
     for (const b of bar.querySelectorAll('button')) {
       const r = b.getBoundingClientRect();
-      if (!isVisible(r) || Math.abs(r.width - r.height) > 2 || r.width < 32 || looksRed(b)) continue;
+      if (!isVisible(r) || r.height < 32 || r.width < r.height * 1.1 || r.width > r.height * 1.4 || looksRed(b)) continue;
       const found = neutralBackground(b);
       if (!found) continue;
       const cs = getComputedStyle(b);
