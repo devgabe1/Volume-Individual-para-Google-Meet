@@ -172,10 +172,10 @@
     analyser.fftSize = 512;
     source.connect(analyser);
 
-    const pipe = { receiver, gain, dry, wet, source, analyser, keepAlive, output: dest.stream, currentVoice: null };
+    const track = stream.getAudioTracks()[0];
+    const pipe = { receiver, track, gain, dry, wet, source, analyser, keepAlive, output: dest.stream, currentVoice: null };
     pipes.add(pipe);
 
-    const track = stream.getAudioTracks()[0];
     track.addEventListener('ended', () => {
       pipes.delete(pipe);
       try { source.disconnect(); gain.disconnect(); } catch {}
@@ -999,7 +999,10 @@
 
     function layout() {
       const vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
-      fab.hidden = dock.docked;
+      // Fora de chamada (tela de espera, depois de sair) não há ninguém para ajustar.
+      const show = inCall();
+      fab.hidden = dock.docked || !show;
+      if (!show && !panel.hidden) { panel.hidden = true; dock.setActive(false); }
       header.style.cursor = dock.docked ? 'default' : '';
       if (!dock.docked) {
         pos.x = Math.min(Math.max(pos.x, 4), vw - FAB - 4);
@@ -1031,7 +1034,12 @@
     }, true);
 
     // Procura a barra periodicamente: ela só existe dentro da chamada e o Meet a recria.
-    setInterval(() => { if (dock.sync()) layout(); }, 1000);
+    let wasInCall = false;
+    setInterval(() => {
+      const changed = dock.sync();
+      const now = inCall();
+      if (changed || now !== wasInCall) { wasInCall = now; layout(); }
+    }, 1000);
     dock.sync();
 
     function draggable(handle, onClick) {
@@ -1216,6 +1224,13 @@
     for (let p = t.parentElement?.closest('[data-participant-id]'); p && p.getAttribute('data-participant-id') === pid;
       p = p.parentElement?.closest('[data-participant-id]')) t = p;
     return t;
+  }
+
+  // Em chamada = conexão WebRTC conectada e algum canal de áudio remoto ativo.
+  // (Na tela de espera não há áudio remoto; ao sair, a conexão fecha e as faixas acabam.)
+  function inCall() {
+    const connected = [...peerConnections].some((pc) => pc.connectionState === 'connected');
+    return connected && [...pipes].some((p) => p.track.readyState === 'live');
   }
 
   // ---------------------------------------------------------------- botão na barra do Meet
