@@ -1226,11 +1226,13 @@
     return t;
   }
 
-  // Em chamada = conexão WebRTC conectada e algum canal de áudio remoto ativo.
-  // (Na tela de espera não há áudio remoto; ao sair, a conexão fecha e as faixas acabam.)
+  // Em chamada = o botão vermelho de sair existe (só aparece dentro da chamada).
+  // Conexão WebRTC não serve: o Meet já conecta o áudio na tela de espera.
+  // Plano B, caso o Meet mude esse botão: alguém foi ouvido nos últimos 30 s.
   function inCall() {
-    const connected = [...peerConnections].some((pc) => pc.connectionState === 'connected');
-    return connected && [...pipes].some((p) => p.track.readyState === 'live');
+    if (findLeaveButton()) return true;
+    const now = performance.now();
+    return [...voices.values()].some((v) => v.lastActive && now - v.lastActive < 30000);
   }
 
   // ---------------------------------------------------------------- botão na barra do Meet
@@ -1255,15 +1257,20 @@
     return false;
   }
 
-  function findMeetBar() {
+  // Botão de sair da chamada: largo, vermelho, no rodapé.
+  function findLeaveButton() {
     const vh = document.documentElement.clientHeight;
-    let leave = null;
     for (const b of document.querySelectorAll('button')) {
       if (b.closest('#meet-volume-root, #meet-volume-dock')) continue;
       const r = b.getBoundingClientRect();
       if (!isVisible(r) || r.top < vh - 200 || r.height < 28 || r.width < r.height * 1.3) continue;
-      if (looksRed(b)) { leave = b; break; }
+      if (looksRed(b)) return b;
     }
+    return null;
+  }
+
+  function findMeetBar() {
+    const leave = findLeaveButton();
     if (!leave) return null;
 
     let bar = leave.parentElement;
