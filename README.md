@@ -26,7 +26,7 @@
 
 ### Chrome Web Store
 
-_Em breve._
+[**Instalar pela Chrome Web Store**](https://chromewebstore.google.com/detail/hgbphnmcegggkpllbhhjmcgdbjoidpoe)
 
 ### Modo desenvolvedor
 
