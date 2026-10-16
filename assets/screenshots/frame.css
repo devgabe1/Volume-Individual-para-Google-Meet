@@ -11,6 +11,6 @@ body {
 .head p { margin: 0; font-size: 20px; color: #bdc1c6; }
 .window {
   position: absolute; left: 50px; top: 172px; width: 1180px; height: 600px;
-  border-radius: 16px; overflow: hidden; background: #202124;
+  border-radius: 16px; overflow: hidden; background: #131314;
   box-shadow: 0 24px 60px rgba(0, 0, 0, .55), 0 0 0 1px rgba(255, 255, 255, .06);
 }

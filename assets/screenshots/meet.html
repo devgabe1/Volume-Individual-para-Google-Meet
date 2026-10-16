@@ -10,7 +10,7 @@
 -->
 <link rel="stylesheet" href="frame.css">
 <style>
-  .meet { position: absolute; inset: 0; background: #202124; }
+  .meet { position: absolute; inset: 0; background: #131314; }
   .top { position: absolute; left: 24px; top: 18px; font-size: 15px; color: #e8eaed; }
   .top span { color: #9aa0a6; margin: 0 8px; }
   .grid {
@@ -22,7 +22,7 @@
   .avatar {
     position: absolute; left: 50%; top: 46%; width: 92px; height: 92px; margin: -46px 0 0 -46px;
     border-radius: 50%; display: grid; place-items: center; color: #fff;
-    font-size: 40px; font-weight: 500;
+    font-size: 40px; font-weight: 400;
   }
   /* Inicial via ::before para não virar texto do quadro (a extensão lê o nome do texto). */
   .avatar::before { content: attr(data-initial); }
@@ -31,7 +31,7 @@
   .mic { position: absolute; right: 12px; top: 12px; width: 28px; height: 28px; border-radius: 50%;
     display: grid; place-items: center; background: rgba(32, 33, 36, .6); }
   .bar-wrap { position: absolute; left: 0; right: 0; bottom: 14px; display: flex; justify-content: center; }
-  .frame { background: #1e1f20; border-radius: 24px; display: flex; }
+  .frame { background: #1d1e1f; border-radius: 24px; display: flex; }
   .bar { display: grid; grid-auto-flow: column; gap: 12px; padding: 12px; align-items: center; }
   .bar button { border: none; padding: 0; cursor: pointer; display: grid; place-items: center; color: #e3e3e3; }
   .grp { display: flex; border-radius: 24px; background: #333537; }
@@ -102,17 +102,18 @@
   const svg = (d, size = 24, color = 'currentColor') =>
     `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="${color}"><path d="${d}"/></svg>`;
 
-  // Pessoas fictícias.
+  // Pessoas fictícias. Cores medidas numa chamada real do Meet: o quadro é a cor do
+  // avatar escurecida, mais clara no centro (mid) e mais escura nas bordas (edge).
   const people = [
-    { id: 'p1', name: 'Ana Souza', bg: '#3b4a6b', av: '#5e7ce2' },
-    { id: 'p2', name: 'Bruno Lima', bg: '#2f4a3a', av: '#34a853' },
-    { id: 'p3', name: 'Carla Mendes', bg: '#5a3a2a', av: '#e8710a' },
-    { id: 'p4', name: 'Diego Rocha', bg: '#46345c', av: '#a142f4' },
+    { id: 'p1', name: 'Ana Souza', mid: '#2a3779', edge: '#232e6a', av: '#3949ab' },
+    { id: 'p2', name: 'Bruno Lima', mid: '#592d1f', edge: '#492013', av: '#5d4037' },
+    { id: 'p3', name: 'Carla Mendes', mid: '#7e3e0d', edge: '#5d2d09', av: '#ef6c00' },
+    { id: 'p4', name: 'Diego Rocha', mid: '#683f2e', edge: '#512b1c', av: '#8d6e63' },
   ];
   const grid = document.getElementById('grid');
   grid.innerHTML = people.map((p) => `
     <div class="tile${p.id === 'p1' ? ' speaking' : ''}" data-participant-id="${p.id}"
-         style="background:radial-gradient(circle at 50% 40%, ${p.bg} 0%, #202124 120%)">
+         style="background:radial-gradient(ellipse at 50% 50%, ${p.mid} 0%, ${p.edge} 75%)">
       <div class="avatar" data-initial="${p.name[0]}" style="background:${p.av}"></div>
       <div class="name">${p.name}</div>
       <div class="mic">${svg(I.micOff, 16, '#e3e3e3')}</div>
