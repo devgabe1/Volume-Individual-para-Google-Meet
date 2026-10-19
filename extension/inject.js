@@ -752,34 +752,16 @@
   // O Meet coloca nos pacotes com fala, junto do CSRC real da pessoa, um CSRC
   // marcador (visto: 42) com o mesmo nível e timestamp, em TODOS os canais. Ele não é
   // uma pessoa: se virasse uma "voz", o volume dela valeria para todo mundo.
-  // Marcador = valor pequeno demais para um SSRC real (que é aleatório de 32 bits)
-  // ou CSRC que aparece em mais de um canal ao mesmo tempo.
+  // Marcador = valor pequeno demais para um SSRC real (que é aleatório de 32 bits).
+  //
+  // NÃO usar "CSRC presente em vários canais ao mesmo tempo": o Meet move as pessoas
+  // entre canais e os pacotes seguem trazendo o CSRC de quem acabou de falar, então
+  // gente de verdade aparece em dois canais e acabava ignorada (o volume parava).
   const markerCsrcs = new Set();
-  const overlapHits = new Map(); // csrc -> vezes em que tocou em 2+ canais no mesmo instante
-  const MARKER_HITS = 3;
-  const FRESH_MS = 200;
 
-  // Recebe os CSRCs de todos os canais num mesmo instante. Timestamps do Chrome são
-  // de relógio absoluto (timeOrigin + now), então dá para comparar entre canais.
-  // Uma pessoa trocando de canal nunca está "fresca" em dois ao mesmo tempo.
   function detectMarkers(lists) {
-    const nowTs = performance.timeOrigin + performance.now();
-    const freshOn = new Map();
     for (const list of lists) {
-      for (const s of list) {
-        if (markerCsrcs.has(s.source)) continue;
-        if (s.source < 65536) { markerCsrcs.add(s.source); continue; }
-        if (nowTs - s.timestamp < FRESH_MS) freshOn.set(s.source, (freshOn.get(s.source) || 0) + 1);
-      }
-    }
-    for (const [source, n] of freshOn) {
-      if (n < 2) continue;
-      const hits = (overlapHits.get(source) || 0) + 1;
-      overlapHits.set(source, hits);
-      if (hits >= MARKER_HITS) {
-        markerCsrcs.add(source);
-        console.info(LOG, `CSRC ${source} toca em vários canais ao mesmo tempo: ignorado (marcador do Meet)`);
-      }
+      for (const s of list) if (s.source < 65536) markerCsrcs.add(s.source);
     }
   }
 
@@ -817,11 +799,7 @@
     for (const pipe of pipes) {
       lists.set(pipe, pipe.sources ? pipe.sources() : pipe.receiver.getContributingSources ? pipe.receiver.getContributingSources() : []);
     }
-    // Um receiver pode ter mais de um canal nosso (ex.: <audio> e WebAudio da mesma
-    // faixa): conta uma vez só, senão todo mundo pareceria "em dois canais" = marcador.
-    const byReceiver = new Map();
-    for (const [pipe, list] of lists) byReceiver.set(pipe.receiver, list);
-    detectMarkers(byReceiver.values());
+    detectMarkers(lists.values());
     for (const pipe of pipes) {
       const info = currentVoiceOf(pipe, lists.get(pipe));
       if (!info) continue;
