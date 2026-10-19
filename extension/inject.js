@@ -650,6 +650,10 @@
     }
   }
 
+  // "Igualar volumes" precisa do áudio passando pelo WebAudio. Quando o Meet decodifica
+  // sozinho (só canais codificados), não há onde aplicar: a opção some do painel.
+  const normalizeAvailable = () => !pipes.size || [...pipes].some((p) => !p.encoded);
+
   function setNormalize(on) {
     store.normalize = on;
     saveStore();
@@ -1581,6 +1585,7 @@
 
       const hiddenCount = voices.size - shown;
       empty.hidden = shown > 0;
+      normalizeToggle.hidden = !normalizeAvailable();
       more.hidden = !showAll && hiddenCount === 0;
       more.textContent = showAll ? 'Esconder inativos' : `Mostrar todos (${hiddenCount} ocultos)`;
 
