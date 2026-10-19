@@ -1488,9 +1488,23 @@
       togglePanel();
     }, true);
 
+    // Tela cheia: o navegador só desenha o elemento em tela cheia e o que está dentro
+    // dele. Nossa UI fica em <html>, fora dele, e sumiria: muda para dentro enquanto durar.
+    function followFullscreen() {
+      const fs = document.fullscreenElement;
+      const parent = fs && !/^(VIDEO|IFRAME|IMG|CANVAS)$/.test(fs.nodeName) ? fs : document.documentElement;
+      let moved = false;
+      for (const el of [host, dock.host]) {
+        if (el.parentNode !== parent) { parent.append(el); moved = true; }
+      }
+      if (moved) layout();
+    }
+    document.addEventListener('fullscreenchange', followFullscreen);
+
     // Procura a barra periodicamente: ela só existe dentro da chamada e o Meet a recria.
     let wasInCall = false;
     setInterval(() => {
+      followFullscreen(); // o Meet pode redesenhar o elemento em tela cheia e nos tirar dele
       const changed = dock.sync();
       const now = inCall();
       if (changed || now !== wasInCall) { wasInCall = now; layout(); }
