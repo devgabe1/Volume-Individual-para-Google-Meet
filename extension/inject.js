@@ -9,6 +9,8 @@
 //    O Meet continua tocando no mesmo elemento (respeita o dispositivo de saída escolhido).
 //    Algumas versões do Meet tocam pelo WebAudio, sem <audio>: aí interceptamos o
 //    createMediaStreamSource e colocamos o GainNode entre a fonte e o resto do grafo dele.
+//    Outras decodificam o áudio sozinhas (AudioWorklet "neteq", lendo os pacotes Opus por
+//    createEncodedStreams): aí o volume é aplicado nos próprios pacotes (encodedPipe).
 // 3. O Meet não usa um stream por pessoa: ele mistura em poucos canais e troca quem
 //    está em cada canal conforme quem fala. A identidade de quem está falando vem nos
 //    CSRCs do RTP (receiver.getContributingSources()). Consultamos isso a cada ~20ms
@@ -46,6 +48,7 @@
   };
   const localTracks = new Set();  // ids das faixas do microfone/câmera/tela (getUserMedia)
   const workletNames = new Map(); // nome do AudioWorkletProcessor -> quantos nós
+  const workletOptions = [];
   const hookLog = [];             // primeiros eventos, com detalhes
   const seenTracks = new Map();   // track.id -> APIs em que a faixa remota apareceu
   function logHook(api, realm, track, extra) {
@@ -181,16 +184,27 @@
       hookStats.workletModules--; // conta nós por nome, não módulos
       const name = String(args[1]).slice(0, 40);
       workletNames.set(name, (workletNames.get(name) || 0) + 1);
+      const o = args[2] || {};
+      if (workletOptions.length < 8) workletOptions.push({ name, inputs: o.numberOfInputs ?? null, outputs: o.numberOfOutputs ?? null, outputChannels: o.outputChannelCount || null });
     });
     if (win.AudioWorklet) {
       const addModule = win.AudioWorklet.prototype.addModule;
       win.AudioWorklet.prototype.addModule = function (...args) { hookStats.workletModules++; return addModule.apply(this, args); };
     }
+    // Meet decodificando o áudio sozinho (AudioWorklet "neteq"): ele lê os pacotes
+    // Opus ainda codificados do receiver. O volume é aplicado nesses pacotes.
     if (win.RTCRtpReceiver && win.RTCRtpReceiver.prototype.createEncodedStreams) {
       const ces = win.RTCRtpReceiver.prototype.createEncodedStreams;
       win.RTCRtpReceiver.prototype.createEncodedStreams = function (...args) {
-        if (this.track && this.track.kind === 'audio') hookStats.encodedStreams++;
-        return ces.apply(this, args);
+        const streams = ces.apply(this, args);
+        if (!this.track || this.track.kind !== 'audio') return streams;
+        hookStats.encodedStreams++;
+        try {
+          return { readable: streams.readable.pipeThrough(encodedPipe(this)), writable: streams.writable };
+        } catch (err) {
+          console.warn(LOG, 'falha ao processar áudio codificado, usando original', err);
+          return streams;
+        }
       };
     }
     // Faixas enviadas para um Worker (processadas/tocadas fora da página).
@@ -382,6 +396,145 @@
     return pipe;
   }
 
+  // ---------------------------------------------------------------- áudio codificado
+  // Cada pacote traz nos metadados os CSRCs de quem está falando nele, então o volume
+  // é aplicado pacote a pacote, para a pessoa certa:
+  //   100%    -> pacote original (sem custo)
+  //   mudo    -> pacote Opus de silêncio
+  //   outro   -> decodifica (WebCodecs), multiplica e codifica de novo
+  const OPUS_SILENCE = new Uint8Array([0xf8, 0xff, 0xfe]);
+  const SOURCES_TTL = 10000;
+
+  function encodedPipe(receiver) {
+    const sources = new Map(); // csrc -> { source, timestamp, audioLevel }, como getContributingSources
+    const pipe = {
+      encoded: true, receiver, track: receiver.track, currentVoice: null,
+      stats: { frames: 0, passed: 0, silenced: 0, reencoded: 0, failed: 0, red: 0, mime: null, csrcs: 0, sizes: [] },
+      sources() {
+        const now = performance.timeOrigin + performance.now();
+        for (const [k, s] of sources) if (now - s.timestamp > SOURCES_TTL) sources.delete(k);
+        return [...sources.values()];
+      },
+    };
+    pipes.add(pipe);
+    receiver.track.addEventListener('ended', () => { pipes.delete(pipe); closeRecoder(pipe); });
+
+    return new TransformStream({
+      async transform(frame, controller) {
+        const st = pipe.stats;
+        st.frames++;
+        let voice = null;
+        try {
+          const md = frame.getMetadata ? frame.getMetadata() : {};
+          st.mime = md.mimeType || st.mime;
+          const size = frame.data.byteLength;
+          if (st.sizes.length < 20) st.sizes.push(size);
+          // Nível: metadado (quando o Chrome informa) ou tamanho do pacote (silêncio/DTX é minúsculo).
+          const level = md.audioLevel ?? (size > 24 ? 0.5 : 0);
+          const ts = performance.timeOrigin + performance.now();
+          const csrcs = md.contributingSources || [];
+          if (csrcs.length) st.csrcs++;
+          for (const c of csrcs) sources.set(c, { source: c, timestamp: ts, audioLevel: level });
+          const real = csrcs.filter((c) => c >= 65536 && !markerCsrcs.has(c));
+          if (real.length) voice = 'c' + real[0];
+          else if (!csrcs.length && md.synchronizationSource >= 65536) voice = 's' + md.synchronizationSource;
+          if (md.synchronizationSource != null) pipe.ssrc = { source: md.synchronizationSource, timestamp: ts, audioLevel: level };
+          if (md.mimeType && /red/i.test(md.mimeType)) { st.red++; voice = null; } // RED: não sabemos mexer
+        } catch {}
+
+        const v = voice && frame.data.byteLength ? voices.get(voice) : null; // pacote vazio: intocado
+        const target = v ? targetOf(v) : 1;
+        try {
+          if (Math.abs(target - 1) < 0.01) {
+            closeRecoder(pipe);
+            st.passed++;
+          } else if (target < 0.01) {
+            frame.data = OPUS_SILENCE.slice().buffer;
+            st.silenced++;
+          } else {
+            const out = await reencode(pipe, frame.data, target);
+            if (out && out.byteLength) { frame.data = out; st.reencoded++; } else st.failed++;
+          }
+        } catch {
+          st.failed++;
+        }
+        controller.enqueue(frame);
+      },
+    });
+  }
+
+  // Decodificador + codificador Opus de um canal, criados só quando alguém está com
+  // volume diferente de 100%. O codificador pode devolver o pacote um quadro depois:
+  // cada saída vai para o pacote mais antigo esperando (atraso fixo de um quadro).
+  function makeRecoder() {
+    const rc = { waiting: [], gain: 1, ts: 0, frameDuration: 0 };
+    rc.enc = new AudioEncoder({
+      output(chunk) {
+        const resolve = rc.waiting.shift();
+        if (!resolve) return;
+        if (!chunk.byteLength) { resolve(null); return; } // pacote vazio: segue o original
+        const buf = new ArrayBuffer(chunk.byteLength);
+        chunk.copyTo(buf);
+        resolve(buf);
+      },
+      error() { rc.broken = true; },
+    });
+    rc.dec = new AudioDecoder({
+      output(data) {
+        try {
+          const n = data.numberOfFrames;
+          const pcm = new Float32Array(n);
+          data.copyTo(pcm, { planeIndex: 0, format: 'f32-planar' });
+          for (let i = 0; i < n; i++) pcm[i] = Math.max(-1, Math.min(1, pcm[i] * rc.gain));
+          const duration = Math.round((n / data.sampleRate) * 1e6);
+          if (rc.frameDuration !== duration) {
+            rc.frameDuration = duration;
+            rc.enc.configure({
+              codec: 'opus', sampleRate: data.sampleRate, numberOfChannels: 1, bitrate: 64000,
+              opus: { frameDuration: duration, complexity: 5, useinbandfec: true },
+            });
+          }
+          rc.enc.encode(new AudioData({
+            format: 'f32-planar', sampleRate: data.sampleRate, numberOfFrames: n, numberOfChannels: 1,
+            timestamp: data.timestamp, data: pcm,
+          }));
+        } catch { rc.broken = true; }
+        data.close();
+      },
+      error() { rc.broken = true; },
+    });
+    rc.dec.configure({ codec: 'opus', sampleRate: 48000, numberOfChannels: 1 });
+    return rc;
+  }
+
+  function closeRecoder(pipe) {
+    const rc = pipe.recoder;
+    if (!rc) return;
+    pipe.recoder = null;
+    for (const r of rc.waiting) r(null);
+    try { rc.dec.close(); } catch {}
+    try { rc.enc.close(); } catch {}
+  }
+
+  function reencode(pipe, data, gain) {
+    if (typeof AudioEncoder === 'undefined' || typeof AudioDecoder === 'undefined') return Promise.resolve(null);
+    if (pipe.recoder && pipe.recoder.broken) closeRecoder(pipe);
+    const rc = pipe.recoder || (pipe.recoder = makeRecoder());
+    rc.gain = gain;
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (buf) => { if (!done) { done = true; resolve(buf); } };
+      rc.waiting.push(finish);
+      // Sem resposta a tempo (ex.: primeiro quadro): o pacote segue original.
+      setTimeout(() => {
+        const i = rc.waiting.indexOf(finish);
+        if (i >= 0) rc.waiting.splice(i, 1);
+        finish(null);
+      }, 30);
+      rc.dec.decode(new EncodedAudioChunk({ type: 'key', timestamp: (rc.ts += 20000), data }));
+    });
+  }
+
   // source -> gain -> dry --------------------------> out
   //                \-> compressor -> limiter -> wet -/
   // "Igualar volumes" (opcional) só troca dry/wet; o caminho comprimido existe sempre
@@ -491,6 +644,7 @@
   function applyNormalize() {
     const on = store.normalize;
     for (const p of pipes) {
+      if (p.encoded) continue;
       p.dry.gain.setTargetAtTime(on ? 0 : 1, p.ctx.currentTime, 0.03);
       p.wet.gain.setTargetAtTime(on ? 1 : 0, p.ctx.currentTime, 0.03);
     }
@@ -622,7 +776,7 @@
 
     // Sem CSRC: o canal em si representa uma fonte (SSRC). Não vale para SSRCs
     // pequenos, que são canais virtuais (o Meet usa 6666, 6667...), não pessoas.
-    const ssrcs = (receiver.getSynchronizationSources ? receiver.getSynchronizationSources() : [])
+    const ssrcs = (pipe.encoded ? (pipe.ssrc ? [pipe.ssrc] : []) : receiver.getSynchronizationSources ? receiver.getSynchronizationSources() : [])
       .filter((s) => s.source >= 65536);
     if (ssrcs.length) return { id: 's' + ssrcs[0].source, level: ssrcs[0].audioLevel ?? 0, timestamp: ssrcs[0].timestamp };
     return null;
@@ -634,7 +788,7 @@
     const now = performance.now();
     const lists = new Map();
     for (const pipe of pipes) {
-      lists.set(pipe, pipe.receiver.getContributingSources ? pipe.receiver.getContributingSources() : []);
+      lists.set(pipe, pipe.sources ? pipe.sources() : pipe.receiver.getContributingSources ? pipe.receiver.getContributingSources() : []);
     }
     detectMarkers(lists.values());
     for (const pipe of pipes) {
@@ -659,6 +813,7 @@
       const prev = pipe.prevVoice && voices.get(pipe.prevVoice);
       if (prev && now - pipe.switchedAt < HANDOFF_MS) target = Math.min(target, targetOf(prev));
 
+      if (pipe.encoded) continue; // aplicado pacote a pacote, em encodedPipe
       if (switched || Math.abs(pipe.gain.gain.value - target) > 0.001) {
         // Rampa curta na troca (sem clique), mais suave em ajustes normais.
         if (switched) pipe.gain.gain.cancelScheduledValues(pipe.ctx.currentTime);
@@ -874,12 +1029,14 @@
       channels: pipes.size,
       audioElements: document.querySelectorAll('audio').length,
       audioContext: ctx ? ctx.state : null,
-      meetAudioContexts: [...new Set([...pipes].map((p) => p.ctx))].filter((c) => c !== ctx).map((c) => c.state),
+      meetAudioContexts: [...new Set([...pipes].map((p) => p.ctx))].filter((c) => c && c !== ctx).map((c) => c.state),
       hooks: { ...hookStats },
       hookLog,
       // Para cada faixa remota: em quais APIs ela apareceu (vazio = nenhuma que vemos).
       receivers: await describeReceivers(),
       workletNodes: Object.fromEntries(workletNames),
+      workletOptions,
+      encodedChannels: [...pipes].filter((p) => p.encoded).map((p) => ({ ...p.stats })),
       localTracks: localTracks.size,
       markerCsrcs: [...markerCsrcs],
       settings: { master, normalize: store.normalize, autoName: store.autoName },
@@ -904,9 +1061,10 @@
         channels.push({
           ch: channelOf(p),
           chosen: p.currentVoice,
-          gain: round(p.gain.gain.value),
-          rms: rms(p.analyser),
-          csrcs: sources(p.receiver.getContributingSources?.() || [], 'c'),
+          gain: p.gain ? round(p.gain.gain.value) : null,
+          rms: p.analyser ? rms(p.analyser) : null,
+          encoded: p.encoded ? { ...p.stats, sizes: undefined } : undefined,
+          csrcs: sources(p.sources ? p.sources() : p.receiver.getContributingSources?.() || [], 'c'),
           ssrcs: sources(p.receiver.getSynchronizationSources?.() || [], 's'),
           inbound,
         });
