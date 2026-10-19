@@ -9,6 +9,8 @@
 //    O Meet continua tocando no mesmo elemento (respeita o dispositivo de saída escolhido).
 //    Algumas versões do Meet tocam pelo WebAudio, sem <audio>: aí interceptamos o
 //    createMediaStreamSource e colocamos o GainNode entre a fonte e o resto do grafo dele.
+//    Outras decodificam o áudio sozinhas (AudioWorklet "neteq", lendo os pacotes Opus por
+//    createEncodedStreams): aí o volume é aplicado nos próprios pacotes (encodedPipe).
 // 3. O Meet não usa um stream por pessoa: ele mistura em poucos canais e troca quem
 //    está em cada canal conforme quem fala. A identidade de quem está falando vem nos
 //    CSRCs do RTP (receiver.getContributingSources()). Consultamos isso a cada ~20ms
@@ -37,51 +39,250 @@
   const voices = new Map();           // voiceId -> { label, name, volume, muted, lastActive, level }
   let master = 1;
   let ctx = null;
-  // Contadores para o diagnóstico: por onde o Meet tenta tocar o áudio.
-  const hookStats = { srcObject: 0, srcObjectRemote: 0, webAudio: 0, webAudioRemote: 0, unmatched: 0, trackProcessor: 0 };
+  // Diagnóstico: por onde o Meet tenta tocar o áudio.
+  const hookStats = {
+    realms: 0, srcObject: 0, srcObjectRemote: 0, webAudio: 0, webAudioRemote: 0, unmatched: 0,
+    trackProcessor: 0, trackProcessorRemote: 0, trackGenerator: 0,
+    audioContexts: 0, workletModules: 0, workers: 0, trackTransfers: 0, remoteTrackTransfers: 0,
+    audioDecoders: 0, scriptTransforms: 0, encodedStreams: 0, encodedInsertablePCs: 0,
+  };
+  const localTracks = new Set();  // ids das faixas do microfone/câmera/tela (getUserMedia)
+  const workletNames = new Map(); // nome do AudioWorkletProcessor -> quantos nós
+  const workletOptions = [];
+  const hookLog = [];             // primeiros eventos, com detalhes
+  const seenTracks = new Map();   // track.id -> APIs em que a faixa remota apareceu
+  function logHook(api, realm, track, extra) {
+    const remote = !!(track && receiversByTrack.has(track.id));
+    const origin = !track ? null : remote ? 'remote' : localTracks.has(track.id) ? 'local' : 'unknown';
+    if (track && remote) {
+      const seen = seenTracks.get(track.id) || new Set();
+      seen.add(api);
+      seenTracks.set(track.id, seen);
+    }
+    if (hookLog.length >= 40) return;
+    hookLog.push({
+      api, realm, remote, origin,
+      kind: track ? track.kind : null,
+      type: track ? Object.prototype.toString.call(track).slice(8, -1) : null,
+      hasLabel: track ? !!track.label : null,
+      state: track ? track.readyState : null,
+      ...extra,
+    });
+  }
   let voiceCounter = 0;
 
-  // ---------------------------------------------------------------- RTCPeerConnection
-  const OrigPC = window.RTCPeerConnection;
-  if (OrigPC) {
-    const PCProxy = new Proxy(OrigPC, {
-      construct(target, args, newTarget) {
-        const pc = Reflect.construct(target, args, newTarget);
-        peerConnections.add(pc);
-        pc.addEventListener('connectionstatechange', () => {
-          if (pc.connectionState === 'closed') peerConnections.delete(pc);
-        });
-        pc.addEventListener('track', (e) => {
-          if (e.track && e.track.kind === 'audio') {
-            receiversByTrack.set(e.track.id, e.receiver);
-            e.track.addEventListener('ended', () => receiversByTrack.delete(e.track.id));
+  const ORIG = Symbol('meetVolumeOrig');
+  const HOOKED = Symbol.for('meetVolumeHooked');
+  const srcDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'srcObject');
+  const origCreateSource = AudioContext.prototype.createMediaStreamSource;
+  const origConnect = AudioNode.prototype.connect;
+  const isStream = (x) => !!x && typeof x.getAudioTracks === 'function' && typeof x.getVideoTracks === 'function';
+
+  // Instala os hooks numa "janela": a página e cada iframe do mesmo domínio que ela
+  // acessar. O Meet pode pegar RTCPeerConnection, AudioContext etc. de um iframe
+  // em branco (cópias "limpas" das APIs), onde os hooks da página não existem.
+  function hookRealm(win, realm) {
+    try {
+      if (!win || win[HOOKED]) return;
+      win[HOOKED] = true;
+    } catch { return; } // outro domínio
+    hookStats.realms++;
+
+    // ---- RTCPeerConnection: quais faixas de áudio são remotas e de qual receiver
+    const OrigPC = win.RTCPeerConnection;
+    if (OrigPC) {
+      const PCProxy = new Proxy(OrigPC, {
+        construct(target, args, newTarget) {
+          const pc = Reflect.construct(target, args, newTarget);
+          peerConnections.add(pc);
+          if (args[0] && args[0].encodedInsertableStreams) hookStats.encodedInsertablePCs++;
+          pc.addEventListener('connectionstatechange', () => {
+            if (pc.connectionState === 'closed') peerConnections.delete(pc);
+          });
+          pc.addEventListener('track', (e) => {
+            if (e.track && e.track.kind === 'audio') {
+              receiversByTrack.set(e.track.id, e.receiver);
+              e.track.addEventListener('ended', () => receiversByTrack.delete(e.track.id));
+            }
+          });
+          return pc;
+        },
+      });
+      win.RTCPeerConnection = PCProxy;
+      if (win.webkitRTCPeerConnection) win.webkitRTCPeerConnection = PCProxy;
+    }
+
+    // ---- Se o Meet clonar a faixa remota, o clone tem outro id: herda o receiver.
+    const clone = win.MediaStreamTrack && win.MediaStreamTrack.prototype.clone;
+    if (clone) {
+      win.MediaStreamTrack.prototype.clone = function () {
+        const copy = clone.call(this);
+        const receiver = receiversByTrack.get(this.id);
+        if (receiver && copy) receiversByTrack.set(copy.id, receiver);
+        if (copy && localTracks.has(this.id)) localTracks.add(copy.id);
+        return copy;
+      };
+    }
+
+    // ---- <audio>.srcObject
+    const desc = Object.getOwnPropertyDescriptor(win.HTMLMediaElement.prototype, 'srcObject');
+    Object.defineProperty(win.HTMLMediaElement.prototype, 'srcObject', {
+      configurable: true,
+      enumerable: desc.enumerable,
+      get() {
+        // O Meet continua enxergando o stream original que ele mesmo definiu.
+        return ORIG in this ? this[ORIG] : desc.get.call(this);
+      },
+      set(value) {
+        this[ORIG] = value;
+        pending.delete(this);
+        hookStats.srcObject++;
+        let out = value;
+        try {
+          out = maybeProcess(this, value, realm);
+        } catch (err) {
+          console.warn(LOG, 'falha ao processar áudio, usando original', err);
+        }
+        desc.set.call(this, out);
+      },
+    });
+
+    // ---- WebAudio: a fonte que o Meet cria continua sendo dele (mesmo AudioContext,
+    // mesma saída), mas o connect dela passa a sair do nosso volume.
+    const create = win.AudioContext && win.AudioContext.prototype.createMediaStreamSource;
+    if (create) {
+      win.AudioContext.prototype.createMediaStreamSource = function (stream) {
+        return interceptSource(this, create.call(this, stream), stream, realm);
+      };
+    }
+    if (win.MediaStreamAudioSourceNode) {
+      win.MediaStreamAudioSourceNode = new Proxy(win.MediaStreamAudioSourceNode, {
+        construct(target, args, newTarget) {
+          const node = Reflect.construct(target, args, newTarget);
+          return interceptSource(args[0], node, args[1] && args[1].mediaStream, realm);
+        },
+      });
+    }
+
+    // ---- Só diagnóstico: outros caminhos por onde o áudio pode sair.
+    const proxyCount = (name, key, onArgs) => {
+      if (!win[name]) return;
+      win[name] = new Proxy(win[name], {
+        construct(target, args, newTarget) {
+          hookStats[key]++;
+          try { if (onArgs) onArgs(args); } catch {}
+          return Reflect.construct(target, args, newTarget);
+        },
+      });
+    };
+    proxyCount('AudioContext', 'audioContexts');
+    proxyCount('AudioDecoder', 'audioDecoders');
+    proxyCount('RTCRtpScriptTransform', 'scriptTransforms');
+    proxyCount('Worker', 'workers');
+    proxyCount('SharedWorker', 'workers');
+    proxyCount('AudioWorkletNode', 'workletModules', (args) => {
+      hookStats.workletModules--; // conta nós por nome, não módulos
+      const name = String(args[1]).slice(0, 40);
+      workletNames.set(name, (workletNames.get(name) || 0) + 1);
+      const o = args[2] || {};
+      if (workletOptions.length < 8) workletOptions.push({ name, inputs: o.numberOfInputs ?? null, outputs: o.numberOfOutputs ?? null, outputChannels: o.outputChannelCount || null });
+    });
+    if (win.AudioWorklet) {
+      const addModule = win.AudioWorklet.prototype.addModule;
+      win.AudioWorklet.prototype.addModule = function (...args) { hookStats.workletModules++; return addModule.apply(this, args); };
+    }
+    // Meet decodificando o áudio sozinho (AudioWorklet "neteq"): ele lê os pacotes
+    // Opus ainda codificados do receiver. O volume é aplicado nesses pacotes.
+    if (win.RTCRtpReceiver && win.RTCRtpReceiver.prototype.createEncodedStreams) {
+      const ces = win.RTCRtpReceiver.prototype.createEncodedStreams;
+      win.RTCRtpReceiver.prototype.createEncodedStreams = function (...args) {
+        const streams = ces.apply(this, args);
+        if (!this.track || this.track.kind !== 'audio') return streams;
+        hookStats.encodedStreams++;
+        try {
+          return { readable: streams.readable.pipeThrough(encodedPipe(this)), writable: streams.writable };
+        } catch (err) {
+          console.warn(LOG, 'falha ao processar áudio codificado, usando original', err);
+          return streams;
+        }
+      };
+    }
+    // Faixas enviadas para um Worker (processadas/tocadas fora da página).
+    for (const proto of [win.Worker && win.Worker.prototype, win.MessagePort && win.MessagePort.prototype]) {
+      if (!proto || !proto.postMessage) continue;
+      const post = proto.postMessage;
+      proto.postMessage = function (msg, transfer, ...rest) {
+        try {
+          const list = Array.isArray(transfer) ? transfer : (transfer && transfer.transfer) || [];
+          for (const t of list) {
+            if (Object.prototype.toString.call(t).slice(8, -1) !== 'MediaStreamTrack' || t.kind !== 'audio') continue;
+            hookStats.trackTransfers++;
+            if (receiversByTrack.has(t.id)) hookStats.remoteTrackTransfers++;
+            logHook('transferToWorker', realm, t);
           }
+        } catch {}
+        return post.call(this, msg, transfer, ...rest);
+      };
+    }
+    // Microfone, câmera e tela: para separar do áudio remoto no diagnóstico.
+    const md = win.navigator && win.navigator.mediaDevices;
+    if (md) {
+      for (const fn of ['getUserMedia', 'getDisplayMedia']) {
+        const orig = md[fn];
+        if (typeof orig !== 'function') continue;
+        md[fn] = function (...args) {
+          return orig.apply(this, args).then((stream) => {
+            try { for (const t of stream.getTracks()) localTracks.add(t.id); } catch {}
+            return stream;
+          });
+        };
+      }
+    }
+
+    // Áudio lido/gerado quadro a quadro não passa pelos hooks acima.
+    if (win.MediaStreamTrackProcessor) {
+      win.MediaStreamTrackProcessor = new Proxy(win.MediaStreamTrackProcessor, {
+        construct(target, args, newTarget) {
+          const track = args[0] && args[0].track;
+          if (track && track.kind === 'audio') {
+            hookStats.trackProcessor++;
+            if (receiversByTrack.has(track.id)) hookStats.trackProcessorRemote++;
+            logHook('trackProcessor', realm, track);
+          }
+          return Reflect.construct(target, args, newTarget);
+        },
+      });
+    }
+    if (win.MediaStreamTrackGenerator) {
+      win.MediaStreamTrackGenerator = new Proxy(win.MediaStreamTrackGenerator, {
+        construct(target, args, newTarget) {
+          const kind = args[0] && (args[0].kind || args[0]);
+          if (kind === 'audio') { hookStats.trackGenerator++; logHook('trackGenerator', realm, null); }
+          return Reflect.construct(target, args, newTarget);
+        },
+      });
+    }
+
+    // ---- iframes do mesmo domínio: instala os hooks na hora em que a página os acessa.
+    const IFrame = win.HTMLIFrameElement && win.HTMLIFrameElement.prototype;
+    if (IFrame) {
+      for (const prop of ['contentWindow', 'contentDocument']) {
+        const d = Object.getOwnPropertyDescriptor(IFrame, prop);
+        if (!d || !d.get) continue;
+        Object.defineProperty(IFrame, prop, {
+          configurable: true,
+          enumerable: d.enumerable,
+          get() {
+            const value = d.get.call(this);
+            try {
+              const w = prop === 'contentWindow' ? value : value && value.defaultView;
+              if (w) hookRealm(w, 'iframe');
+            } catch {}
+            return value;
+          },
         });
-        return pc;
-      },
-    });
-    window.RTCPeerConnection = PCProxy;
-    if (window.webkitRTCPeerConnection) window.webkitRTCPeerConnection = PCProxy;
-  }
-
-  // Se o Meet clonar a faixa remota, o clone tem outro id: herda o receiver.
-  const origClone = MediaStreamTrack.prototype.clone;
-  MediaStreamTrack.prototype.clone = function () {
-    const copy = origClone.call(this);
-    const receiver = receiversByTrack.get(this.id);
-    if (receiver && copy) receiversByTrack.set(copy.id, receiver);
-    return copy;
-  };
-
-  // Só contado (diagnóstico): áudio lido quadro a quadro não passa por nenhum hook.
-  if (window.MediaStreamTrackProcessor) {
-    window.MediaStreamTrackProcessor = new Proxy(window.MediaStreamTrackProcessor, {
-      construct(target, args, newTarget) {
-        const track = args[0] && args[0].track;
-        if (track && track.kind === 'audio') hookStats.trackProcessor++;
-        return Reflect.construct(target, args, newTarget);
-      },
-    });
+      }
+    }
   }
 
   // ---------------------------------------------------------------- AudioContext
@@ -98,33 +299,8 @@
     return ctx;
   }
 
-  // ---------------------------------------------------------------- srcObject hook
-  const srcDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'srcObject');
-  const ORIG = Symbol('meetVolumeOrig');
-
-  Object.defineProperty(HTMLMediaElement.prototype, 'srcObject', {
-    configurable: true,
-    enumerable: srcDesc.enumerable,
-    get() {
-      // O Meet continua enxergando o stream original que ele mesmo definiu.
-      return ORIG in this ? this[ORIG] : srcDesc.get.call(this);
-    },
-    set(value) {
-      this[ORIG] = value;
-      pending.delete(this);
-      hookStats.srcObject++;
-      let out = value;
-      try {
-        out = maybeProcess(this, value);
-      } catch (err) {
-        console.warn(LOG, 'falha ao processar áudio, usando original', err);
-      }
-      srcDesc.set.call(this, out);
-    },
-  });
-
   function findReceiver(stream) {
-    if (!(stream instanceof MediaStream)) return null;
+    if (!isStream(stream)) return null;
     if (stream.getVideoTracks().length) return null;
     const track = stream.getAudioTracks()[0];
     if (!track) return null;
@@ -134,8 +310,9 @@
     return receiver;
   }
 
-  function maybeProcess(el, stream) {
+  function maybeProcess(el, stream, realm) {
     const receiver = findReceiver(stream);
+    if (isStream(stream)) logHook('srcObject', realm, stream.getAudioTracks()[0], { video: stream.getVideoTracks().length });
     if (!receiver) return stream;
     hookStats.srcObjectRemote++;
     const c = getCtx();
@@ -156,17 +333,28 @@
     }
   }
 
-  // ---------------------------------------------------------------- WebAudio hook
-  // Meet tocando pelo WebAudio: a fonte que ele cria continua sendo dele (mesmo
-  // AudioContext, mesma saída), mas o connect dela passa a sair do nosso volume.
-  const origCreateSource = AudioContext.prototype.createMediaStreamSource;
-  const origConnect = AudioNode.prototype.connect;
-
-  function interceptSource(c, node, stream) {
+  function interceptSource(c, node, stream, realm) {
     hookStats.webAudio++;
     try {
       const receiver = findReceiver(stream);
-      if (!receiver || !(c instanceof AudioContext) || c === ctx) return node;
+      if (isStream(stream)) logHook('webAudio', realm, stream.getAudioTracks()[0]);
+      if (!receiver && hookLog.length < 40) {
+        // Para onde vai uma fonte que não reconhecemos (destino = está tocando).
+        const entry = hookLog[hookLog.length - 1];
+        const connect = node.connect;
+        node.connect = function (dest, ...args) {
+          try {
+            if (entry && entry.api === 'webAudio') {
+              entry.to = entry.to || [];
+              const name = Object.prototype.toString.call(dest).slice(8, -1);
+              if (entry.to.length < 4) entry.to.push(name === 'AudioWorkletNode' ? 'Worklet:' + [...workletNames.keys()].join('|') : name);
+            }
+          } catch {}
+          return connect.call(this, dest, ...args);
+        };
+      }
+      // Só AudioContext de verdade (não OfflineAudioContext) e nunca o nosso.
+      if (!receiver || !c || typeof c.startRendering === 'function' || c === ctx) return node;
       hookStats.webAudioRemote++;
       const pipe = buildChain(c, node, receiver, stream.getAudioTracks()[0]);
       node.connect = (...args) => pipe.out.connect(...args);
@@ -177,17 +365,16 @@
     return node;
   }
 
-  AudioContext.prototype.createMediaStreamSource = function (stream) {
-    return interceptSource(this, origCreateSource.call(this, stream), stream);
-  };
-  if (window.MediaStreamAudioSourceNode) {
-    window.MediaStreamAudioSourceNode = new Proxy(window.MediaStreamAudioSourceNode, {
-      construct(target, args, newTarget) {
-        const node = Reflect.construct(target, args, newTarget);
-        return interceptSource(args[0], node, args[1] && args[1].mediaStream);
-      },
-    });
-  }
+  hookRealm(window, 'page');
+  // Plano B para iframes acessados sem passar pelo getter (ex.: window.frames[0]).
+  new MutationObserver((mutations) => {
+    for (const m of mutations) {
+      for (const n of m.addedNodes) {
+        if (n.nodeName === 'IFRAME') n.contentWindow; // o getter instala os hooks
+        else if (n.querySelectorAll) for (const f of n.querySelectorAll('iframe')) f.contentWindow;
+      }
+    }
+  }).observe(document, { childList: true, subtree: true });
 
   function createPipe(stream, receiver) {
     const c = getCtx();
@@ -207,6 +394,145 @@
     pipe.output = dest.stream;
     track.addEventListener('ended', () => srcDesc.set.call(keepAlive, null));
     return pipe;
+  }
+
+  // ---------------------------------------------------------------- áudio codificado
+  // Cada pacote traz nos metadados os CSRCs de quem está falando nele, então o volume
+  // é aplicado pacote a pacote, para a pessoa certa:
+  //   100%    -> pacote original (sem custo)
+  //   mudo    -> pacote Opus de silêncio
+  //   outro   -> decodifica (WebCodecs), multiplica e codifica de novo
+  const OPUS_SILENCE = new Uint8Array([0xf8, 0xff, 0xfe]);
+  const SOURCES_TTL = 10000;
+
+  function encodedPipe(receiver) {
+    const sources = new Map(); // csrc -> { source, timestamp, audioLevel }, como getContributingSources
+    const pipe = {
+      encoded: true, receiver, track: receiver.track, currentVoice: null,
+      stats: { frames: 0, passed: 0, silenced: 0, reencoded: 0, failed: 0, red: 0, mime: null, csrcs: 0, sizes: [] },
+      sources() {
+        const now = performance.timeOrigin + performance.now();
+        for (const [k, s] of sources) if (now - s.timestamp > SOURCES_TTL) sources.delete(k);
+        return [...sources.values()];
+      },
+    };
+    pipes.add(pipe);
+    receiver.track.addEventListener('ended', () => { pipes.delete(pipe); closeRecoder(pipe); });
+
+    return new TransformStream({
+      async transform(frame, controller) {
+        const st = pipe.stats;
+        st.frames++;
+        let voice = null;
+        try {
+          const md = frame.getMetadata ? frame.getMetadata() : {};
+          st.mime = md.mimeType || st.mime;
+          const size = frame.data.byteLength;
+          if (st.sizes.length < 20) st.sizes.push(size);
+          // Nível: metadado (quando o Chrome informa) ou tamanho do pacote (silêncio/DTX é minúsculo).
+          const level = md.audioLevel ?? (size > 24 ? 0.5 : 0);
+          const ts = performance.timeOrigin + performance.now();
+          const csrcs = md.contributingSources || [];
+          if (csrcs.length) st.csrcs++;
+          for (const c of csrcs) sources.set(c, { source: c, timestamp: ts, audioLevel: level });
+          const real = csrcs.filter((c) => c >= 65536 && !markerCsrcs.has(c));
+          if (real.length) voice = 'c' + real[0];
+          else if (!csrcs.length && md.synchronizationSource >= 65536) voice = 's' + md.synchronizationSource;
+          if (md.synchronizationSource != null) pipe.ssrc = { source: md.synchronizationSource, timestamp: ts, audioLevel: level };
+          if (md.mimeType && /red/i.test(md.mimeType)) { st.red++; voice = null; } // RED: não sabemos mexer
+        } catch {}
+
+        const v = voice && frame.data.byteLength ? voices.get(voice) : null; // pacote vazio: intocado
+        const target = v ? targetOf(v) : 1;
+        try {
+          if (Math.abs(target - 1) < 0.01) {
+            closeRecoder(pipe);
+            st.passed++;
+          } else if (target < 0.01) {
+            frame.data = OPUS_SILENCE.slice().buffer;
+            st.silenced++;
+          } else {
+            const out = await reencode(pipe, frame.data, target);
+            if (out && out.byteLength) { frame.data = out; st.reencoded++; } else st.failed++;
+          }
+        } catch {
+          st.failed++;
+        }
+        controller.enqueue(frame);
+      },
+    });
+  }
+
+  // Decodificador + codificador Opus de um canal, criados só quando alguém está com
+  // volume diferente de 100%. O codificador pode devolver o pacote um quadro depois:
+  // cada saída vai para o pacote mais antigo esperando (atraso fixo de um quadro).
+  function makeRecoder() {
+    const rc = { waiting: [], gain: 1, ts: 0, frameDuration: 0 };
+    rc.enc = new AudioEncoder({
+      output(chunk) {
+        const resolve = rc.waiting.shift();
+        if (!resolve) return;
+        if (!chunk.byteLength) { resolve(null); return; } // pacote vazio: segue o original
+        const buf = new ArrayBuffer(chunk.byteLength);
+        chunk.copyTo(buf);
+        resolve(buf);
+      },
+      error() { rc.broken = true; },
+    });
+    rc.dec = new AudioDecoder({
+      output(data) {
+        try {
+          const n = data.numberOfFrames;
+          const pcm = new Float32Array(n);
+          data.copyTo(pcm, { planeIndex: 0, format: 'f32-planar' });
+          for (let i = 0; i < n; i++) pcm[i] = Math.max(-1, Math.min(1, pcm[i] * rc.gain));
+          const duration = Math.round((n / data.sampleRate) * 1e6);
+          if (rc.frameDuration !== duration) {
+            rc.frameDuration = duration;
+            rc.enc.configure({
+              codec: 'opus', sampleRate: data.sampleRate, numberOfChannels: 1, bitrate: 64000,
+              opus: { frameDuration: duration, complexity: 5, useinbandfec: true },
+            });
+          }
+          rc.enc.encode(new AudioData({
+            format: 'f32-planar', sampleRate: data.sampleRate, numberOfFrames: n, numberOfChannels: 1,
+            timestamp: data.timestamp, data: pcm,
+          }));
+        } catch { rc.broken = true; }
+        data.close();
+      },
+      error() { rc.broken = true; },
+    });
+    rc.dec.configure({ codec: 'opus', sampleRate: 48000, numberOfChannels: 1 });
+    return rc;
+  }
+
+  function closeRecoder(pipe) {
+    const rc = pipe.recoder;
+    if (!rc) return;
+    pipe.recoder = null;
+    for (const r of rc.waiting) r(null);
+    try { rc.dec.close(); } catch {}
+    try { rc.enc.close(); } catch {}
+  }
+
+  function reencode(pipe, data, gain) {
+    if (typeof AudioEncoder === 'undefined' || typeof AudioDecoder === 'undefined') return Promise.resolve(null);
+    if (pipe.recoder && pipe.recoder.broken) closeRecoder(pipe);
+    const rc = pipe.recoder || (pipe.recoder = makeRecoder());
+    rc.gain = gain;
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (buf) => { if (!done) { done = true; resolve(buf); } };
+      rc.waiting.push(finish);
+      // Sem resposta a tempo (ex.: primeiro quadro): o pacote segue original.
+      setTimeout(() => {
+        const i = rc.waiting.indexOf(finish);
+        if (i >= 0) rc.waiting.splice(i, 1);
+        finish(null);
+      }, 30);
+      rc.dec.decode(new EncodedAudioChunk({ type: 'key', timestamp: (rc.ts += 20000), data }));
+    });
   }
 
   // source -> gain -> dry --------------------------> out
@@ -318,10 +644,15 @@
   function applyNormalize() {
     const on = store.normalize;
     for (const p of pipes) {
+      if (p.encoded) continue;
       p.dry.gain.setTargetAtTime(on ? 0 : 1, p.ctx.currentTime, 0.03);
       p.wet.gain.setTargetAtTime(on ? 1 : 0, p.ctx.currentTime, 0.03);
     }
   }
+
+  // "Igualar volumes" precisa do áudio passando pelo WebAudio. Quando o Meet decodifica
+  // sozinho (só canais codificados), não há onde aplicar: a opção some do painel.
+  const normalizeAvailable = () => !pipes.size || [...pipes].some((p) => !p.encoded);
 
   function setNormalize(on) {
     store.normalize = on;
@@ -449,7 +780,7 @@
 
     // Sem CSRC: o canal em si representa uma fonte (SSRC). Não vale para SSRCs
     // pequenos, que são canais virtuais (o Meet usa 6666, 6667...), não pessoas.
-    const ssrcs = (receiver.getSynchronizationSources ? receiver.getSynchronizationSources() : [])
+    const ssrcs = (pipe.encoded ? (pipe.ssrc ? [pipe.ssrc] : []) : receiver.getSynchronizationSources ? receiver.getSynchronizationSources() : [])
       .filter((s) => s.source >= 65536);
     if (ssrcs.length) return { id: 's' + ssrcs[0].source, level: ssrcs[0].audioLevel ?? 0, timestamp: ssrcs[0].timestamp };
     return null;
@@ -461,7 +792,7 @@
     const now = performance.now();
     const lists = new Map();
     for (const pipe of pipes) {
-      lists.set(pipe, pipe.receiver.getContributingSources ? pipe.receiver.getContributingSources() : []);
+      lists.set(pipe, pipe.sources ? pipe.sources() : pipe.receiver.getContributingSources ? pipe.receiver.getContributingSources() : []);
     }
     detectMarkers(lists.values());
     for (const pipe of pipes) {
@@ -486,6 +817,7 @@
       const prev = pipe.prevVoice && voices.get(pipe.prevVoice);
       if (prev && now - pipe.switchedAt < HANDOFF_MS) target = Math.min(target, targetOf(prev));
 
+      if (pipe.encoded) continue; // aplicado pacote a pacote, em encodedPipe
       if (switched || Math.abs(pipe.gain.gain.value - target) > 0.001) {
         // Rampa curta na troca (sem clique), mais suave em ajustes normais.
         if (switched) pipe.gain.gain.cancelScheduledValues(pipe.ctx.currentTime);
@@ -635,6 +967,36 @@
   // Grava alguns segundos do que o Meet informa sobre cada canal de áudio, para
   // entender o comportamento real dele numa chamada. Nomes e quadros viram apelidos
   // (Pessoa1, Quadro1...) para o arquivo poder ser compartilhado.
+  // Cada faixa remota: onde apareceu, estado e se o Chrome está de fato tocando o
+  // áudio dela (jitterBufferEmittedCount só sobe quando algo consome o áudio).
+  async function describeReceivers() {
+    const out = [];
+    const seen = new Set();
+    for (const [id, receiver] of receiversByTrack) {
+      if (seen.has(receiver)) continue;
+      seen.add(receiver);
+      const t = receiver.track;
+      const d = {
+        seenBy: [...(seenTracks.get(id) || [])],
+        state: t ? t.readyState : null, muted: t ? t.muted : null, enabled: t ? t.enabled : null,
+        transform: !!receiver.transform,
+        csrcs: (receiver.getContributingSources?.() || []).length,
+      };
+      try {
+        for (const r of (await receiver.getStats()).values()) {
+          if (r.type !== 'inbound-rtp') continue;
+          d.packets = r.packetsReceived;
+          d.energy = r.totalAudioEnergy != null ? +r.totalAudioEnergy.toFixed(4) : null;
+          d.emitted = r.jitterBufferEmittedCount ?? null;
+          d.samples = r.totalSamplesReceived ?? null;
+          d.playoutId = r.playoutId ? 'sim' : null;
+        }
+      } catch {}
+      out.push(d);
+    }
+    return out;
+  }
+
   async function record(seconds = 15, onProgress) {
     const alias = (prefix) => {
       const map = new Map();
@@ -671,8 +1033,15 @@
       channels: pipes.size,
       audioElements: document.querySelectorAll('audio').length,
       audioContext: ctx ? ctx.state : null,
-      meetAudioContexts: [...new Set([...pipes].map((p) => p.ctx))].filter((c) => c !== ctx).map((c) => c.state),
+      meetAudioContexts: [...new Set([...pipes].map((p) => p.ctx))].filter((c) => c && c !== ctx).map((c) => c.state),
       hooks: { ...hookStats },
+      hookLog,
+      // Para cada faixa remota: em quais APIs ela apareceu (vazio = nenhuma que vemos).
+      receivers: await describeReceivers(),
+      workletNodes: Object.fromEntries(workletNames),
+      workletOptions,
+      encodedChannels: [...pipes].filter((p) => p.encoded).map((p) => ({ ...p.stats })),
+      localTracks: localTracks.size,
       markerCsrcs: [...markerCsrcs],
       settings: { master, normalize: store.normalize, autoName: store.autoName },
       headerExtensions: [...pipes].map((p) => {
@@ -696,9 +1065,10 @@
         channels.push({
           ch: channelOf(p),
           chosen: p.currentVoice,
-          gain: round(p.gain.gain.value),
-          rms: rms(p.analyser),
-          csrcs: sources(p.receiver.getContributingSources?.() || [], 'c'),
+          gain: p.gain ? round(p.gain.gain.value) : null,
+          rms: p.analyser ? rms(p.analyser) : null,
+          encoded: p.encoded ? { ...p.stats, sizes: undefined } : undefined,
+          csrcs: sources(p.sources ? p.sources() : p.receiver.getContributingSources?.() || [], 'c'),
           ssrcs: sources(p.receiver.getSynchronizationSources?.() || [], 's'),
           inbound,
         });
@@ -1215,6 +1585,7 @@
 
       const hiddenCount = voices.size - shown;
       empty.hidden = shown > 0;
+      normalizeToggle.hidden = !normalizeAvailable();
       more.hidden = !showAll && hiddenCount === 0;
       more.textContent = showAll ? 'Esconder inativos' : `Mostrar todos (${hiddenCount} ocultos)`;
 
