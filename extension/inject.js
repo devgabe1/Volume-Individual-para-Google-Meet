@@ -7,6 +7,8 @@
 // 2. Interceptamos o setter de `srcObject` dos elementos <audio>. Quando o Meet
 //    tenta tocar um stream remoto, trocamos por: stream -> GainNode -> stream novo.
 //    O Meet continua tocando no mesmo elemento (respeita o dispositivo de saída escolhido).
+//    Algumas versões do Meet tocam pelo WebAudio, sem <audio>: aí interceptamos o
+//    createMediaStreamSource e colocamos o GainNode entre a fonte e o resto do grafo dele.
 // 3. O Meet não usa um stream por pessoa: ele mistura em poucos canais e troca quem
 //    está em cada canal conforme quem fala. A identidade de quem está falando vem nos
 //    CSRCs do RTP (receiver.getContributingSources()). Consultamos isso a cada ~20ms
@@ -35,6 +37,8 @@
   const voices = new Map();           // voiceId -> { label, name, volume, muted, lastActive, level }
   let master = 1;
   let ctx = null;
+  // Contadores para o diagnóstico: por onde o Meet tenta tocar o áudio.
+  const hookStats = { srcObject: 0, srcObjectRemote: 0, webAudio: 0, webAudioRemote: 0, unmatched: 0, trackProcessor: 0 };
   let voiceCounter = 0;
 
   // ---------------------------------------------------------------- RTCPeerConnection
@@ -58,6 +62,26 @@
     });
     window.RTCPeerConnection = PCProxy;
     if (window.webkitRTCPeerConnection) window.webkitRTCPeerConnection = PCProxy;
+  }
+
+  // Se o Meet clonar a faixa remota, o clone tem outro id: herda o receiver.
+  const origClone = MediaStreamTrack.prototype.clone;
+  MediaStreamTrack.prototype.clone = function () {
+    const copy = origClone.call(this);
+    const receiver = receiversByTrack.get(this.id);
+    if (receiver && copy) receiversByTrack.set(copy.id, receiver);
+    return copy;
+  };
+
+  // Só contado (diagnóstico): áudio lido quadro a quadro não passa por nenhum hook.
+  if (window.MediaStreamTrackProcessor) {
+    window.MediaStreamTrackProcessor = new Proxy(window.MediaStreamTrackProcessor, {
+      construct(target, args, newTarget) {
+        const track = args[0] && args[0].track;
+        if (track && track.kind === 'audio') hookStats.trackProcessor++;
+        return Reflect.construct(target, args, newTarget);
+      },
+    });
   }
 
   // ---------------------------------------------------------------- AudioContext
@@ -88,6 +112,7 @@
     set(value) {
       this[ORIG] = value;
       pending.delete(this);
+      hookStats.srcObject++;
       let out = value;
       try {
         out = maybeProcess(this, value);
@@ -102,12 +127,17 @@
     if (!(stream instanceof MediaStream)) return null;
     if (stream.getVideoTracks().length) return null;
     const track = stream.getAudioTracks()[0];
-    return track ? receiversByTrack.get(track.id) || null : null;
+    if (!track) return null;
+    const receiver = receiversByTrack.get(track.id) || null;
+    // Áudio que não reconhecemos como remoto (diagnóstico; inclui o microfone).
+    if (!receiver && receiversByTrack.size) hookStats.unmatched++;
+    return receiver;
   }
 
   function maybeProcess(el, stream) {
     const receiver = findReceiver(stream);
     if (!receiver) return stream;
+    hookStats.srcObjectRemote++;
     const c = getCtx();
     if (c.state !== 'running') {
       // Sem gesto do usuário ainda: toca o original e troca assim que liberar.
@@ -126,6 +156,39 @@
     }
   }
 
+  // ---------------------------------------------------------------- WebAudio hook
+  // Meet tocando pelo WebAudio: a fonte que ele cria continua sendo dele (mesmo
+  // AudioContext, mesma saída), mas o connect dela passa a sair do nosso volume.
+  const origCreateSource = AudioContext.prototype.createMediaStreamSource;
+  const origConnect = AudioNode.prototype.connect;
+
+  function interceptSource(c, node, stream) {
+    hookStats.webAudio++;
+    try {
+      const receiver = findReceiver(stream);
+      if (!receiver || !(c instanceof AudioContext) || c === ctx) return node;
+      hookStats.webAudioRemote++;
+      const pipe = buildChain(c, node, receiver, stream.getAudioTracks()[0]);
+      node.connect = (...args) => pipe.out.connect(...args);
+      node.disconnect = (...args) => pipe.out.disconnect(...args);
+    } catch (err) {
+      console.warn(LOG, 'falha ao processar áudio (WebAudio), usando original', err);
+    }
+    return node;
+  }
+
+  AudioContext.prototype.createMediaStreamSource = function (stream) {
+    return interceptSource(this, origCreateSource.call(this, stream), stream);
+  };
+  if (window.MediaStreamAudioSourceNode) {
+    window.MediaStreamAudioSourceNode = new Proxy(window.MediaStreamAudioSourceNode, {
+      construct(target, args, newTarget) {
+        const node = Reflect.construct(target, args, newTarget);
+        return interceptSource(args[0], node, args[1] && args[1].mediaStream);
+      },
+    });
+  }
+
   function createPipe(stream, receiver) {
     const c = getCtx();
 
@@ -136,13 +199,23 @@
     srcDesc.set.call(keepAlive, stream);
     keepAlive.play().catch(() => {});
 
-    // source -> gain -> dry --------------------------> dest
-    //                \-> compressor -> limiter -> wet -/
-    // "Igualar volumes" (opcional) só troca dry/wet; o caminho comprimido existe sempre
-    // para a troca ser instantânea e sem clique.
-    const source = c.createMediaStreamSource(stream);
-    const gain = c.createGain();
+    const track = stream.getAudioTracks()[0];
+    const pipe = buildChain(c, origCreateSource.call(c, stream), receiver, track);
     const dest = c.createMediaStreamDestination();
+    pipe.out.connect(dest);
+    pipe.keepAlive = keepAlive;
+    pipe.output = dest.stream;
+    track.addEventListener('ended', () => srcDesc.set.call(keepAlive, null));
+    return pipe;
+  }
+
+  // source -> gain -> dry --------------------------> out
+  //                \-> compressor -> limiter -> wet -/
+  // "Igualar volumes" (opcional) só troca dry/wet; o caminho comprimido existe sempre
+  // para a troca ser instantânea e sem clique.
+  function buildChain(c, source, receiver, track) {
+    const gain = c.createGain();
+    const out = c.createGain();
     const dry = c.createGain();
     const wet = c.createGain();
 
@@ -161,25 +234,23 @@
     limiter.attack.value = 0.001;
     limiter.release.value = 0.1;
 
-    source.connect(gain);
-    gain.connect(dry).connect(dest);
-    gain.connect(comp).connect(limiter).connect(wet).connect(dest);
+    origConnect.call(source, gain);
+    gain.connect(dry).connect(out);
+    gain.connect(comp).connect(limiter).connect(wet).connect(out);
     dry.gain.value = store.normalize ? 0 : 1;
     wet.gain.value = store.normalize ? 1 : 0;
 
     // Nível do som que chega no canal (antes do nosso volume), para o diagnóstico.
     const analyser = c.createAnalyser();
     analyser.fftSize = 512;
-    source.connect(analyser);
+    origConnect.call(source, analyser);
 
-    const track = stream.getAudioTracks()[0];
-    const pipe = { receiver, track, gain, dry, wet, source, analyser, keepAlive, output: dest.stream, currentVoice: null };
+    const pipe = { ctx: c, receiver, track, gain, dry, wet, source, analyser, out, currentVoice: null };
     pipes.add(pipe);
 
     track.addEventListener('ended', () => {
       pipes.delete(pipe);
-      try { source.disconnect(); gain.disconnect(); } catch {}
-      srcDesc.set.call(keepAlive, null);
+      try { gain.disconnect(); analyser.disconnect(); } catch {}
     });
     return pipe;
   }
@@ -245,11 +316,10 @@
   window.postMessage({ [BRIDGE]: 'toBridge', type: 'ready' }, location.origin);
 
   function applyNormalize() {
-    if (!ctx) return;
     const on = store.normalize;
     for (const p of pipes) {
-      p.dry.gain.setTargetAtTime(on ? 0 : 1, ctx.currentTime, 0.03);
-      p.wet.gain.setTargetAtTime(on ? 1 : 0, ctx.currentTime, 0.03);
+      p.dry.gain.setTargetAtTime(on ? 0 : 1, p.ctx.currentTime, 0.03);
+      p.wet.gain.setTargetAtTime(on ? 1 : 0, p.ctx.currentTime, 0.03);
     }
   }
 
@@ -418,8 +488,8 @@
 
       if (switched || Math.abs(pipe.gain.gain.value - target) > 0.001) {
         // Rampa curta na troca (sem clique), mais suave em ajustes normais.
-        if (switched) pipe.gain.gain.cancelScheduledValues(ctx.currentTime);
-        pipe.gain.gain.setTargetAtTime(target, ctx.currentTime, switched ? 0.004 : 0.02);
+        if (switched) pipe.gain.gain.cancelScheduledValues(pipe.ctx.currentTime);
+        pipe.gain.gain.setTargetAtTime(target, pipe.ctx.currentTime, switched ? 0.004 : 0.02);
       }
     }
   }
@@ -601,6 +671,8 @@
       channels: pipes.size,
       audioElements: document.querySelectorAll('audio').length,
       audioContext: ctx ? ctx.state : null,
+      meetAudioContexts: [...new Set([...pipes].map((p) => p.ctx))].filter((c) => c !== ctx).map((c) => c.state),
+      hooks: { ...hookStats },
       markerCsrcs: [...markerCsrcs],
       settings: { master, normalize: store.normalize, autoName: store.autoName },
       headerExtensions: [...pipes].map((p) => {
@@ -981,8 +1053,10 @@
     root.append(panel, fab, tile.el);
     document.documentElement.append(host);
 
+    let openedOver = new WeakSet(); // menus do Meet já abertos quando o painel abriu
     const togglePanel = () => {
       panel.hidden = !panel.hidden;
+      if (!panel.hidden) openedOver = new WeakSet(meetPopups().map((p) => p.el));
       dock.setActive(!panel.hidden);
       render();
       layout();
@@ -1019,8 +1093,15 @@
       if (dock.docked) {
         // Na barra do Meet: abre acima do botão, centralizado nele, como os menus do Meet.
         const r = dock.rect();
-        panel.style.top = Math.max(4, r.top - ph - 12) + 'px';
-        panel.style.left = Math.min(Math.max(r.left + r.width / 2 - PANEL_W / 2, 4), vw - PANEL_W - 4) + 'px';
+        const left = Math.min(Math.max(r.left + r.width / 2 - PANEL_W / 2, 4), vw - PANEL_W - 4);
+        let top = r.top - ph - 12;
+        // Menu do Meet que já estava aberto acima da barra (ex.: emojis): sobe acima dele.
+        for (const p of meetPopups().sort((a, b) => b.r.top - a.r.top)) {
+          if (!openedOver.has(p.el)) continue;
+          if (overlaps({ left, right: left + PANEL_W, top, bottom: top + ph }, p.r) && p.r.top - ph - 8 >= 4) top = p.r.top - ph - 8;
+        }
+        panel.style.top = Math.max(4, top) + 'px';
+        panel.style.left = left + 'px';
         return;
       }
       // Flutuante: abre acima do botão se couber; senão, abaixo. Alinhado pela esquerda.
@@ -1150,26 +1231,15 @@
 
     // ---- nunca cobrir menus e janelas do Meet
     // Nossa UI fica no z-index máximo para não sumir atrás dos vídeos. Quando o Meet
-    // abre um menu/diálogo (identificado pelo papel de acessibilidade, que é estável)
-    // e ele encosta em algo nosso, escondemos só o que está por cima até ele fechar.
-    const MEET_POPUPS = '[role="menu"], [role="listbox"], [role="dialog"], [role="alertdialog"], [aria-modal="true"]';
-    const overlaps = (a, b) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
-
+    // abre um menu/diálogo e ele encosta em algo nosso, escondemos só o que está por
+    // cima até ele fechar. Exceção: o que já estava aberto quando o painel foi aberto
+    // (ex.: barra de emojis, que fica aberta) — o usuário pediu o painel por cima dele.
     function yieldToMeetPopups() {
-      const vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
-      const popups = [];
-      for (const el of document.querySelectorAll(MEET_POPUPS)) {
-        const r = el.getBoundingClientRect();
-        if (!r.width || !r.height) continue;
-        if (r.width >= vw * 0.95 && r.height >= vh * 0.95) continue; // contêiner de página, não um menu
-        const cs = getComputedStyle(el);
-        if (cs.visibility === 'hidden' || cs.opacity === '0') continue;
-        popups.push(r);
-      }
+      const popups = meetPopups();
       for (const el of [fab, panel, tile.el]) {
         if (el.hidden) { el.classList.remove('behind'); continue; }
         const r = el.getBoundingClientRect();
-        el.classList.toggle('behind', popups.some((p) => overlaps(r, p)));
+        el.classList.toggle('behind', popups.some((p) => overlaps(r, p.r) && !(el === panel && openedOver.has(p.el))));
       }
       // O painel e o botão também têm prioridade sobre o controle do quadro.
       if (!tile.el.hidden) {
@@ -1245,6 +1315,24 @@
       if (t && tile.showFor(t, avoid)) clearTimeout(hideTimer);
       else { clearTimeout(hideTimer); hideTimer = setTimeout(tile.hide, 400); }
     }
+  }
+
+  // Menus e janelas do Meet abertos (identificados pelo papel de acessibilidade, que é estável).
+  const MEET_POPUPS = '[role="menu"], [role="listbox"], [role="dialog"], [role="alertdialog"], [aria-modal="true"]';
+  const overlaps = (a, b) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+
+  function meetPopups() {
+    const vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
+    const popups = [];
+    for (const el of document.querySelectorAll(MEET_POPUPS)) {
+      const r = el.getBoundingClientRect();
+      if (!r.width || !r.height) continue;
+      if (r.width >= vw * 0.95 && r.height >= vh * 0.95) continue; // contêiner de página, não um menu
+      const cs = getComputedStyle(el);
+      if (cs.visibility === 'hidden' || cs.opacity === '0') continue;
+      popups.push({ el, r });
+    }
+    return popups;
   }
 
   // Quadro (o elemento mais externo com [data-participant-id]) sob o ponteiro.
