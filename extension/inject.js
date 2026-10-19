@@ -318,6 +318,7 @@
     const c = getCtx();
     if (c.state !== 'running') {
       // Sem gesto do usuário ainda: toca o original e troca assim que liberar.
+      releaseWebAudio(stream.getAudioTracks()[0]);
       pending.add(el);
       return stream;
     }
@@ -355,8 +356,13 @@
       }
       // Só AudioContext de verdade (não OfflineAudioContext) e nunca o nosso.
       if (!receiver || !c || typeof c.startRendering === 'function' || c === ctx) return node;
+      // A faixa já toca por <audio>: esta fonte é análise do Meet (indicador de fala),
+      // não reprodução. Fica intocada.
+      const track = stream.getAudioTracks()[0];
+      if (elementPlays(track)) return node;
       hookStats.webAudioRemote++;
-      const pipe = buildChain(c, node, receiver, stream.getAudioTracks()[0]);
+      const pipe = buildChain(c, node, receiver, track);
+      pipe.webAudio = true;
       node.connect = (...args) => pipe.out.connect(...args);
       node.disconnect = (...args) => pipe.out.disconnect(...args);
     } catch (err) {
@@ -376,6 +382,22 @@
     }
   }).observe(document, { childList: true, subtree: true });
 
+  const elementPlays = (track) => [...pipes].some((p) => p.keepAlive && p.track.id === track.id) ||
+    [...pending].some((el) => { const s = el[ORIG]; return isStream(s) && s.getAudioTracks()[0]?.id === track.id; });
+
+  // A faixa passou a tocar por <audio>: o canal WebAudio dela era só análise do Meet.
+  // Sai do controle e fica em 100%, sem compressão.
+  function releaseWebAudio(track) {
+    for (const p of pipes) {
+      if (!p.webAudio || p.track.id !== track.id) continue;
+      pipes.delete(p);
+      p.gain.gain.cancelScheduledValues(p.ctx.currentTime);
+      p.gain.gain.value = 1;
+      p.dry.gain.value = 1;
+      p.wet.gain.value = 0;
+    }
+  }
+
   function createPipe(stream, receiver) {
     const c = getCtx();
 
@@ -387,6 +409,7 @@
     keepAlive.play().catch(() => {});
 
     const track = stream.getAudioTracks()[0];
+    releaseWebAudio(track);
     const pipe = buildChain(c, origCreateSource.call(c, stream), receiver, track);
     const dest = c.createMediaStreamDestination();
     pipe.out.connect(dest);
@@ -794,7 +817,11 @@
     for (const pipe of pipes) {
       lists.set(pipe, pipe.sources ? pipe.sources() : pipe.receiver.getContributingSources ? pipe.receiver.getContributingSources() : []);
     }
-    detectMarkers(lists.values());
+    // Um receiver pode ter mais de um canal nosso (ex.: <audio> e WebAudio da mesma
+    // faixa): conta uma vez só, senão todo mundo pareceria "em dois canais" = marcador.
+    const byReceiver = new Map();
+    for (const [pipe, list] of lists) byReceiver.set(pipe.receiver, list);
+    detectMarkers(byReceiver.values());
     for (const pipe of pipes) {
       const info = currentVoiceOf(pipe, lists.get(pipe));
       if (!info) continue;
