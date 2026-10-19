@@ -38,11 +38,19 @@
   let master = 1;
   let ctx = null;
   // Diagnóstico: por onde o Meet tenta tocar o áudio.
-  const hookStats = { realms: 0, srcObject: 0, srcObjectRemote: 0, webAudio: 0, webAudioRemote: 0, unmatched: 0, trackProcessor: 0, trackProcessorRemote: 0, trackGenerator: 0 };
+  const hookStats = {
+    realms: 0, srcObject: 0, srcObjectRemote: 0, webAudio: 0, webAudioRemote: 0, unmatched: 0,
+    trackProcessor: 0, trackProcessorRemote: 0, trackGenerator: 0,
+    audioContexts: 0, workletModules: 0, workers: 0, trackTransfers: 0, remoteTrackTransfers: 0,
+    audioDecoders: 0, scriptTransforms: 0, encodedStreams: 0, encodedInsertablePCs: 0,
+  };
+  const localTracks = new Set();  // ids das faixas do microfone/câmera/tela (getUserMedia)
+  const workletNames = new Map(); // nome do AudioWorkletProcessor -> quantos nós
   const hookLog = [];             // primeiros eventos, com detalhes
   const seenTracks = new Map();   // track.id -> APIs em que a faixa remota apareceu
   function logHook(api, realm, track, extra) {
     const remote = !!(track && receiversByTrack.has(track.id));
+    const origin = !track ? null : remote ? 'remote' : localTracks.has(track.id) ? 'local' : 'unknown';
     if (track && remote) {
       const seen = seenTracks.get(track.id) || new Set();
       seen.add(api);
@@ -50,7 +58,7 @@
     }
     if (hookLog.length >= 40) return;
     hookLog.push({
-      api, realm, remote,
+      api, realm, remote, origin,
       kind: track ? track.kind : null,
       type: track ? Object.prototype.toString.call(track).slice(8, -1) : null,
       hasLabel: track ? !!track.label : null,
@@ -84,6 +92,7 @@
         construct(target, args, newTarget) {
           const pc = Reflect.construct(target, args, newTarget);
           peerConnections.add(pc);
+          if (args[0] && args[0].encodedInsertableStreams) hookStats.encodedInsertablePCs++;
           pc.addEventListener('connectionstatechange', () => {
             if (pc.connectionState === 'closed') peerConnections.delete(pc);
           });
@@ -107,6 +116,7 @@
         const copy = clone.call(this);
         const receiver = receiversByTrack.get(this.id);
         if (receiver && copy) receiversByTrack.set(copy.id, receiver);
+        if (copy && localTracks.has(this.id)) localTracks.add(copy.id);
         return copy;
       };
     }
@@ -151,7 +161,71 @@
       });
     }
 
-    // ---- Só diagnóstico: áudio lido/gerado quadro a quadro não passa pelos hooks acima.
+    // ---- Só diagnóstico: outros caminhos por onde o áudio pode sair.
+    const proxyCount = (name, key, onArgs) => {
+      if (!win[name]) return;
+      win[name] = new Proxy(win[name], {
+        construct(target, args, newTarget) {
+          hookStats[key]++;
+          try { if (onArgs) onArgs(args); } catch {}
+          return Reflect.construct(target, args, newTarget);
+        },
+      });
+    };
+    proxyCount('AudioContext', 'audioContexts');
+    proxyCount('AudioDecoder', 'audioDecoders');
+    proxyCount('RTCRtpScriptTransform', 'scriptTransforms');
+    proxyCount('Worker', 'workers');
+    proxyCount('SharedWorker', 'workers');
+    proxyCount('AudioWorkletNode', 'workletModules', (args) => {
+      hookStats.workletModules--; // conta nós por nome, não módulos
+      const name = String(args[1]).slice(0, 40);
+      workletNames.set(name, (workletNames.get(name) || 0) + 1);
+    });
+    if (win.AudioWorklet) {
+      const addModule = win.AudioWorklet.prototype.addModule;
+      win.AudioWorklet.prototype.addModule = function (...args) { hookStats.workletModules++; return addModule.apply(this, args); };
+    }
+    if (win.RTCRtpReceiver && win.RTCRtpReceiver.prototype.createEncodedStreams) {
+      const ces = win.RTCRtpReceiver.prototype.createEncodedStreams;
+      win.RTCRtpReceiver.prototype.createEncodedStreams = function (...args) {
+        if (this.track && this.track.kind === 'audio') hookStats.encodedStreams++;
+        return ces.apply(this, args);
+      };
+    }
+    // Faixas enviadas para um Worker (processadas/tocadas fora da página).
+    for (const proto of [win.Worker && win.Worker.prototype, win.MessagePort && win.MessagePort.prototype]) {
+      if (!proto || !proto.postMessage) continue;
+      const post = proto.postMessage;
+      proto.postMessage = function (msg, transfer, ...rest) {
+        try {
+          const list = Array.isArray(transfer) ? transfer : (transfer && transfer.transfer) || [];
+          for (const t of list) {
+            if (Object.prototype.toString.call(t).slice(8, -1) !== 'MediaStreamTrack' || t.kind !== 'audio') continue;
+            hookStats.trackTransfers++;
+            if (receiversByTrack.has(t.id)) hookStats.remoteTrackTransfers++;
+            logHook('transferToWorker', realm, t);
+          }
+        } catch {}
+        return post.call(this, msg, transfer, ...rest);
+      };
+    }
+    // Microfone, câmera e tela: para separar do áudio remoto no diagnóstico.
+    const md = win.navigator && win.navigator.mediaDevices;
+    if (md) {
+      for (const fn of ['getUserMedia', 'getDisplayMedia']) {
+        const orig = md[fn];
+        if (typeof orig !== 'function') continue;
+        md[fn] = function (...args) {
+          return orig.apply(this, args).then((stream) => {
+            try { for (const t of stream.getTracks()) localTracks.add(t.id); } catch {}
+            return stream;
+          });
+        };
+      }
+    }
+
+    // Áudio lido/gerado quadro a quadro não passa pelos hooks acima.
     if (win.MediaStreamTrackProcessor) {
       win.MediaStreamTrackProcessor = new Proxy(win.MediaStreamTrackProcessor, {
         construct(target, args, newTarget) {
@@ -250,6 +324,21 @@
     try {
       const receiver = findReceiver(stream);
       if (isStream(stream)) logHook('webAudio', realm, stream.getAudioTracks()[0]);
+      if (!receiver && hookLog.length < 40) {
+        // Para onde vai uma fonte que não reconhecemos (destino = está tocando).
+        const entry = hookLog[hookLog.length - 1];
+        const connect = node.connect;
+        node.connect = function (dest, ...args) {
+          try {
+            if (entry && entry.api === 'webAudio') {
+              entry.to = entry.to || [];
+              const name = Object.prototype.toString.call(dest).slice(8, -1);
+              if (entry.to.length < 4) entry.to.push(name === 'AudioWorkletNode' ? 'Worklet:' + [...workletNames.keys()].join('|') : name);
+            }
+          } catch {}
+          return connect.call(this, dest, ...args);
+        };
+      }
       // Só AudioContext de verdade (não OfflineAudioContext) e nunca o nosso.
       if (!receiver || !c || typeof c.startRendering === 'function' || c === ctx) return node;
       hookStats.webAudioRemote++;
@@ -719,6 +808,36 @@
   // Grava alguns segundos do que o Meet informa sobre cada canal de áudio, para
   // entender o comportamento real dele numa chamada. Nomes e quadros viram apelidos
   // (Pessoa1, Quadro1...) para o arquivo poder ser compartilhado.
+  // Cada faixa remota: onde apareceu, estado e se o Chrome está de fato tocando o
+  // áudio dela (jitterBufferEmittedCount só sobe quando algo consome o áudio).
+  async function describeReceivers() {
+    const out = [];
+    const seen = new Set();
+    for (const [id, receiver] of receiversByTrack) {
+      if (seen.has(receiver)) continue;
+      seen.add(receiver);
+      const t = receiver.track;
+      const d = {
+        seenBy: [...(seenTracks.get(id) || [])],
+        state: t ? t.readyState : null, muted: t ? t.muted : null, enabled: t ? t.enabled : null,
+        transform: !!receiver.transform,
+        csrcs: (receiver.getContributingSources?.() || []).length,
+      };
+      try {
+        for (const r of (await receiver.getStats()).values()) {
+          if (r.type !== 'inbound-rtp') continue;
+          d.packets = r.packetsReceived;
+          d.energy = r.totalAudioEnergy != null ? +r.totalAudioEnergy.toFixed(4) : null;
+          d.emitted = r.jitterBufferEmittedCount ?? null;
+          d.samples = r.totalSamplesReceived ?? null;
+          d.playoutId = r.playoutId ? 'sim' : null;
+        }
+      } catch {}
+      out.push(d);
+    }
+    return out;
+  }
+
   async function record(seconds = 15, onProgress) {
     const alias = (prefix) => {
       const map = new Map();
@@ -759,8 +878,9 @@
       hooks: { ...hookStats },
       hookLog,
       // Para cada faixa remota: em quais APIs ela apareceu (vazio = nenhuma que vemos).
-      receivers: [...receiversByTrack.keys()].filter((id, i, a) => a.indexOf(id) === i)
-        .map((id) => ({ seenBy: [...(seenTracks.get(id) || [])] })),
+      receivers: await describeReceivers(),
+      workletNodes: Object.fromEntries(workletNames),
+      localTracks: localTracks.size,
       markerCsrcs: [...markerCsrcs],
       settings: { master, normalize: store.normalize, autoName: store.autoName },
       headerExtensions: [...pipes].map((p) => {
